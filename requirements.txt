@@ -1,0 +1,16 @@
+numpy
+pandas
+scipy
+scikit-learn
+joblib
+plotly
+fastapi
+pydantic
+uvicorn[standard]
+python-multipart
+jinja2
+python-dotenv
+openai
+itsdangerous
+aiofiles
+psycopg2-binary

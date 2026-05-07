@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Модуль анализа спектров</title>
+    <link rel="stylesheet" href="/static/analysis.css">
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+    <script defer src="/static/analysis.js"></script>
+</head>
+<body>
+<div class="analysis-shell">
+    <header class="topbar">
+        <div>
+            <h1>Анализ спектров</h1>
+            <p class="muted">Обучение и применение сохранённых моделей</p>
+        </div>
+        <a href="/" class="btn btn-primary">Назад</a>
+    </header>
+
+    <section class="major-block">
+        <h2 class="major-title">Блок 1. Создание моделей</h2>
+
+        <section class="card">
+            <h3>1) Загрузка спектров</h3>
+            <div class="line-controls">
+                <input id="train-file" type="file" accept=".csv,.txt">
+                <button id="preview-btn" class="btn btn-primary">Проверить файл</button>
+            </div>
+            <div id="preview-result" class="result-box"></div>
+        </section>
+
+        <section class="card">
+            <h3>2) Выбор модели и обучение</h3>
+            <div class="grid">
+                <label>Тип модели
+                    <select id="model-type" class="input-field">
+                        <option value="pca">PCA</option>
+                        <option value="pls">PLS (регрессия)</option>
+                        <option value="plsda">PLS-DA (классификация)</option>
+                        <option value="mcr_als">MCR-ALS (stub)</option>
+                    </select>
+                </label>
+                <label>Название модели
+                    <input id="model-name" class="input-field" type="text" placeholder="Например, pca_plasma_batch_01">
+                </label>
+                <label>n_components
+                    <input id="n-components" class="input-field" type="number" min="1" placeholder="2">
+                </label>
+            </div>
+
+            <label id="targets-wrap">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
+                <textarea id="target-values" class="input-field" rows="3" placeholder="0,0,0,1,1,1"></textarea>
+            </label>
+            <div class="line-controls wrap" id="targets-import-wrap">
+                <input id="targets-file" type="file" accept=".txt,.csv">
+                <button id="load-targets-btn" class="btn">Подставить targets в поле</button>
+                <span id="targets-file-hint" class="muted"></span>
+            </div>
+
+            <div class="grid">
+                <label>Валидация
+                    <select id="do-validation" class="input-field">
+                        <option value="true">Включена (train/test)</option>
+                        <option value="false">Выключена</option>
+                    </select>
+                </label>
+                <label>test_size (0.1 - 0.5)
+                    <input id="test-size" class="input-field" type="number" min="0.1" max="0.5" step="0.05" value="0.3">
+                </label>
+                <label>random_state
+                    <input id="random-state" class="input-field" type="number" step="1" value="42">
+                </label>
+            </div>
+
+            <button id="train-btn" class="btn btn-primary">Запустить анализ и сохранить модель</button>
+        </section>
+    </section>
+
+    <section class="major-block">
+        <h2 class="major-title">Блок 2. Работа с сохранёнными моделями</h2>
+
+        <section class="card">
+            <h3>3) Сохранённые модели</h3>
+            <div class="line-controls wrap">
+                <button id="refresh-models-btn" class="btn">Обновить список</button>
+                <button id="load-model-btn" class="btn btn-primary">Загрузить выбранную модель</button>
+                <button id="delete-model-btn" class="btn btn-danger">Удалить выбранную модель</button>
+            </div>
+            <div id="loaded-model-badge" class="loaded-badge loaded-badge--empty">Модель не загружена</div>
+            <div id="models-list" class="models-list"></div>
+
+            <div class="subcard">
+                <h4>Загрузка собственной модели</h4>
+                <div class="grid">
+                    <label>Файл модели (.joblib)
+                        <input id="upload-model-file" type="file" accept=".joblib">
+                    </label>
+                    <label>Файл метаданных (.json, опционально)
+                        <input id="upload-meta-file" type="file" accept=".json">
+                    </label>
+                    <label>Тип модели
+                        <select id="upload-model-type" class="input-field">
+                            <option value="pca">pca</option>
+                            <option value="pls">pls</option>
+                            <option value="plsda">plsda</option>
+                            <option value="mcr_als">mcr_als</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="line-controls">
+                    <input id="upload-model-name" class="input-field" type="text" placeholder="Название модели (опционально)">
+                    <button id="upload-model-btn" class="btn">Загрузить модель на сервер</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h3>4) Применение модели к новым данным</h3>
+            <div class="line-controls wrap">
+                <input id="infer-file" type="file" accept=".csv,.txt" multiple>
+                <button id="infer-btn" class="btn btn-primary">Применить модель к выбранным файлам</button>
+            </div>
+            <div id="infer-files-hint" class="muted"></div>
+        </section>
+
+        <section class="card">
+            <h3>5) Результаты</h3>
+            <div id="result-explainer" class="result-note"></div>
+            <div id="validation-summary" class="metrics-grid"></div>
+            <div id="validation-plot" class="plot-box plot-box-small"></div>
+            <div id="plot" class="plot-box"></div>
+            <details class="raw-json-wrap">
+                <summary>Показать сырой JSON ответа</summary>
+                <pre id="text-result" class="result-box"></pre>
+            </details>
+        </section>
+    </section>
+</div>
+</body>
+</html>

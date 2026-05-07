@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Спектральный анализ</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.14.0.min.js"></script>
+    <script defer src="/static/app.js"></script>
+</head>
+<body>
+
+<header class="auth-header">
+    {% if is_authenticated %}
+        <span class="auth-user">Вы вошли как {{ user }}</span>
+        <form class="logout-form" action="/logout" method="post">
+            <button type="submit" class="btn-secondary logout-btn">Выйти</button>
+        </form>
+    {% else %}
+        <div class="guest-banner">
+            <p class="guest-banner__text">Создайте аккаунт, чтобы сохранять пресеты.</p>
+            <div class="guest-banner__actions">
+                <a href="/login" class="guest-link">Войти</a>
+                <a href="/register" class="guest-link guest-link--primary">Регистрация</a>
+            </div>
+        </div>
+    {% endif %}
+</header>
+<div id="auth-banner" class="auth-banner hidden" role="alert"></div>
+
+<h1>Обработка спектров</h1>
+<div style="max-width:1400px;margin:0 auto 14px;padding:0 20px;">
+    <a href="/analysis" class="btn-primary" style="text-decoration:none;display:inline-block;padding:10px 16px;border-radius:8px;">
+        Анализ
+    </a>
+</div>
+<div class="main-content">
+    <div class="controls">
+        <!-- Upload Section -->
+        <div class="control-card">
+            <h3 class="control-title">Управление файлами</h3>
+            <div class="upload-section">
+                <div class="file-input-container" id="dropZone">
+                    <label for="files" class="file-input-label">
+                        <span class="file-input-text">Выбрать файлы или перетащите их сюда</span>
+                    </label>
+                    <input type="file" id="files" multiple title="Загрузите файлы для анализа">
+                </div>
+                <div class="upload-buttons">
+                    <button onclick="uploadFiles()" class="btn-primary" title="Загрузить выбранные файлы">
+                        Загрузить
+                    </button>
+                    <button onclick="addMoreFiles()" class="btn-secondary" title="Добавить файлы к текущим">
+                        Добавить
+                    </button>
+                </div>
+                <div id="file-count" class="file-count">Не выбран ни один файл</div>
+            </div>
+        </div>
+        <div class="control-card control-card--uploaded">
+            <h3 class="control-title">Загруженные файлы</h3>
+            <div id="uploaded-files-container" class="uploaded-files-container"></div>
+        </div>
+
+        <div class="control-card presets-card">
+            <h3 class="control-title">Мои пресеты</h3>
+            <p class="presets-hint" id="presets-hint">
+                {% if is_authenticated %}
+                    Выберите слот, чтобы сохранить текущие параметры.
+                {% else %}
+                    Войдите, чтобы сохранять пресеты.
+                {% endif %}
+            </p>
+            <div id="presets-grid" class="presets-grid">
+                {% for slot in preset_slots %}
+                <div class="preset-slot" data-slot="{{ slot }}">
+                    <div class="preset-slot-header">
+                        <span class="preset-slot-label">Слот {{ slot }}</span>
+                        <span class="preset-slot-name preset-slot-name--empty" id="preset-name-{{ slot }}">Свободно</span>
+                    </div>
+                    <div class="preset-slot-updated" id="preset-updated-{{ slot }}"></div>
+                    <div class="preset-slot-actions">
+                        <button type="button" class="btn-secondary" data-action="save" data-slot="{{ slot }}" {% if not is_authenticated %}disabled{% endif %}>Сохранить</button>
+                        <button type="button" class="btn-secondary" data-action="load" data-slot="{{ slot }}" {% if not is_authenticated %}disabled{% endif %}>Загрузить</button>
+                        <button type="button" class="btn-secondary" data-action="delete" data-slot="{{ slot }}" {% if not is_authenticated %}disabled{% endif %}>Удалить</button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        
+
+        <!-- Parameters Sections -->
+        <div class="control-card">
+            <h3 class="control-title">Параметры обработки</h3>
+            
+            <!-- Frequency Range -->
+            <div class="parameter-group">
+                <h4 class="parameter-title">Диапазон частот</h4>
+                <div class="input-group">
+                    <label for="min_freq" class="input-label">Минимальная частота:</label>
+                    <input type="number" id="min_freq" class="input-field" step="10" placeholder="0" title="Минимальная частота для анализа">
+                </div>
+                <div class="input-group">
+                    <label for="max_freq" class="input-label">Максимальная частота:</label>
+                    <input type="number" id="max_freq" class="input-field" step="10" placeholder="10000" title="Максимальная частота для анализа">
+                </div>
+            </div>
+                        <!-- Baseline Removal -->
+            <div class="parameter-group" id="baseline_group">
+                <h4 class="parameter-title">
+                Базовая линия
+                <span class="help-icon" data-tooltip="Удаление базовой линии: выбирается метод и параметры.">?</span>
+                </h4>
+            
+                <div class="checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="remove_baseline" class="checkbox-input">
+                    Удалять базовую линию
+                </label>
+                </div>
+            
+                <div id="baseline_controls" style="display:none;">
+                <div class="input-group">
+                    <label for="baseline_method" class="input-label">Метод удаления:</label>
+                    <select id="baseline_method" class="input-field">
+                    <option value="als">BL_ALS</option>
+                    <option value="poly">Полиномиальная аппроксимация</option>
+                    <option value="rb">Rolling Ball (морфология)</option>
+                    </select>
+                </div>
+            
+                <!-- Параметры ALS -->
+                <div id="baseline_als_params">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="lam" class="input-label">lam:</label>
+                        <input type="number" id="lam" class="input-field small" step="100" placeholder="1000">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="p" class="input-label">p:</label>
+                        <input type="number" id="p" class="input-field small" step="0.001" placeholder="0.001">
+                    </div>
+                    </div>
+                </div>
+            
+                <!-- Параметры Poly -->
+                <div id="baseline_poly_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="poly_degree" class="input-label">Степень:</label>
+                        <input type="number" id="poly_degree" class="input-field small" step="1" placeholder="3">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="poly_n_iter" class="input-label">Кол-во итераций:</label>
+                        <input type="number" id="poly_n_iter" class="input-field small" step="1" placeholder="10">
+                    </div>
+                    </div>
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="poly_asymmetry" class="input-label">Асимметрия:</label>
+                        <input type="number" id="poly_asymmetry" class="input-field small" step="0.01" placeholder="0.01">
+                    </div>
+                    </div>
+                </div>
+            
+                <!-- Параметры RB -->
+                <div id="baseline_rb_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="rb_radius" class="input-label">radius:</label>
+                        <input type="number" id="rb_radius" class="input-field small" step="10" value="50">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="rb_units" class="input-label">ед.:</label>
+                        <select id="rb_units" class="input-field small">
+                        <option value="x">см⁻¹</option>
+                        <option value="points">точки</option>
+                        </select>
+                    </div>
+                    </div>
+                </div>
+            
+                </div>
+            </div>
+
+            <!-- Normalization -->
+            <div class="parameter-group" id="normalization_group">
+            <h4 class="parameter-title">
+                Нормировка
+                <span class="help-icon" data-tooltip="Нормировка приводит спектры к сопоставимому масштабу. Выберите метод: SNV или нормировка на максимум.">?</span>
+            </h4>
+
+            <div class="checkbox-group">
+                <label class="checkbox-label">
+                <input type="checkbox" id="normalize" class="checkbox-input" title="Включить нормировку">
+                Включить нормировку
+                </label>
+            </div>
+
+            <div id="normalization_controls" style="display:none;">
+                <div class="input-group">
+                <label for="normalize_method" class="input-label">Метод:</label>
+                <select id="normalize_method" class="input-field">
+                    <option value="snv">SNV (стандартизация)</option>
+                    <option value="max">Нормировка на максимум</option>
+                    <option value="minmax">Min–Max (0–1)</option>
+                </select>
+                </div>
+
+                <div id="normalize_params_hint" class="hint-text" style="margin-top:6px;">
+                Для выбранного метода параметры не требуются.
+                </div>
+            </div>
+            </div>
+            
+                
+                        <!-- Smoothing -->
+            <!-- Сглаживание -->
+            <div class="parameter-group" id="smoothing_group">
+                <h4 class="parameter-title">
+                Сглаживание
+                <span class="help-icon" data-tooltip="Сглаживание спектра: выберите метод и параметры.">?</span>
+                </h4>
+            
+                <div class="checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="apply_smoothing" class="checkbox-input">
+                    Включить сглаживание
+                </label>
+                </div>
+            
+                <div id="smoothing_controls" style="display:none;">
+                <div class="input-group">
+                    <label for="smoothing_method" class="input-label">Метод:</label>
+                    <select id="smoothing_method" class="input-field">
+                    <option value="savgol">Savitzky–Golay</option>
+                    <option value="whittaker">Whittaker smoothing</option>
+                    <option value="gaussian">Гауссов фильтр</option>
+                    </select>
+                </div>
+            
+                <!-- Параметры SavGol -->
+                <div id="savgol_params">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="window_length" class="input-label">Размер окна:</label>
+                        <input type="number" id="window_length" class="input-field small" step="2" value="25">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="polyorder" class="input-label">Полином:</label>
+                        <input type="number" id="polyorder" class="input-field small" step="1" value="3">
+                    </div>
+                    </div>
+                </div>
+            
+                <!-- Параметры Whittaker -->
+                <div id="whittaker_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="whit_lambda" class="input-label">λ (жёсткость):</label>
+                        <input type="number" id="whit_lambda" class="input-field small" step="100" value="1000">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="whit_d" class="input-label">d (порядок):</label>
+                        <input type="number" id="whit_d" class="input-field small" step="1" value="2">
+                    </div>
+                    </div>
+                </div>
+            
+                <!-- Параметры Gaussian -->
+                <div id="gaussian_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="gauss_sigma" class="input-label">σ (Степень сглаж.):</label>
+                        <input type="number" id="gauss_sigma" class="input-field small" step="0.1" value="2.0">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="gauss_mode" class="input-label">Края:</label>
+                        <select id="gauss_mode" class="input-field small">
+                        <option value="nearest">Повторяется крайняя точка</option>
+                        <option value="reflect">Отражение сигнала</option>
+                        <option value="mirror">Зеркальное отражение</option>
+                        <option value="wrap">Закольцовывание</option>
+                        <option value="constant">Заполнение нулями</option>
+                        </select>
+                    </div>
+                    </div>
+                </div>
+                </div>
+            </div>
+
+
+            <!-- Moving Average -->
+            <div class="parameter-group">
+                <h4 class="parameter-title">Скользящее среднее
+                    <span class="help-icon" data-tooltip="Расчет скользящего среднего для сглаживания данных. Укажите размер окна для усреднения.">?</span>
+                </h4>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="show_moving_average" class="checkbox-input" title="Показать скользящую среднюю">
+                        Включить
+                    </label>
+                </div>
+                <div class="input-group">
+                    <label for="moving_average_window" class="input-label">Размер окна:</label>
+                    <input type="number" id="moving_average_window" class="input-field" step="1" placeholder="10" title="Размер окна для скользящего среднего">
+                </div>
+            </div>
+
+            <!-- Statistics -->
+            <div class="parameter-group">
+                <h4 class="parameter-title">Статистика
+                    <span class="help-icon" data-tooltip="Вычисляет среднее значение и стандартное отклонение по всем загруженным и обработанным спектрам для статистического анализа.">?</span>
+                </h4>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="calculate_mean_std" class="checkbox-input" title="Рассчитать среднее и стандартное отклонение">
+                        Среднее и СКО
+                    </label>
+                </div>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="calculate_boxplot" class="checkbox-input" title="Построить ящики с усами">
+                        Box plot
+                    </label>
+                </div>
+            </div>
+
+            
+            <!-- Peak Detection -->
+                        <!-- Peaks / Поиск пиков -->
+            <div class="parameter-group" id="peaks_group">
+                <h4 class="parameter-title">
+                Поиск пиков
+                <span class="help-icon" data-tooltip="Поиск пиков: выберите метод и параметры.">?</span>
+                </h4>
+            
+                <div class="checkbox-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="find_peaks" class="checkbox-input">
+                    Искать пики
+                </label>
+                </div>
+            
+                <div id="peaks_controls" style="display:none;">
+                <div class="input-group">
+                    <label for="peak_method" class="input-label">Метод:</label>
+                    <select id="peak_method" class="input-field">
+                    <option value="findpeaks">SciPy find_peaks</option>
+                    <option value="cwt">Wavelet (CWT)</option>
+                    <option value="derivative2">Вторая производная (Derivative-based)</option>
+                    </select>
+                </div>
+            
+                <!-- Параметры find_peaks -->
+                <div id="findpeaks_params">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="prominence" class="input-label">Выраженность:</label>
+                        <input type="number" id="prominence" class="input-field small" step="1" value="1">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="peak_width" class="input-label">Ширина:</label>
+                        <input type="number" id="peak_width" class="input-field small" step="1" value="1">
+                    </div>
+                    </div>
+            
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="peak_height" class="input-label">Высота:</label>
+                        <input type="number" id="peak_height" class="input-field small" step="0.1" placeholder="необязательно">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="peak_distance" class="input-label">Дистанция:</label>
+                        <input type="number" id="peak_distance" class="input-field small" step="1" placeholder="необязательно">
+                    </div>
+                    </div>
+                </div>
+
+                <!-- Параметры Derivative-based (2-я производная) -->
+                <div id="derivative_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="der_min_prominence" class="input-label">Выраженность:</label>
+                        <input type="number" id="der_min_prominence" class="input-field small" step="1" value="1">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="der_min_distance" class="input-label">Дистанция:</label>
+                        <input type="number" id="der_min_distance" class="input-field small" step="1" placeholder="необязательно">
+                    </div>
+                    </div>
+                
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="der_sg_window" class="input-label">SG окно:</label>
+                        <input type="number" id="der_sg_window" class="input-field small" step="2" value="21" min="5">
+                    </div>
+                    <div class="input-group compact">
+                        <label for="der_sg_poly" class="input-label">SG порядок:</label>
+                        <input type="number" id="der_sg_poly" class="input-field small" step="1" value="3" min="2">
+                    </div>
+                    </div>
+                
+                    <div class="input-row">
+                    <div class="input-group compact">
+                        <label for="der_min_curvature" class="input-label">Кривизна:</label>
+                        <input type="number" id="der_min_curvature" class="input-field small" step="0.1" placeholder="авто">
+                    </div>
+                    <div class="input-hint">
+                        <small>Если пусто — порог подбирается автоматически.</small>
+                    </div>
+                    </div>
+                </div>
+
+
+
+
+
+
+
+                <!-- Параметры CWT -->
+                <div id="cwt_params" style="display:none;">
+                    <div class="input-row">
+                    <div class="input-group">
+                        <label for="cwt_widths" class="input-label">Ширины (точки):</label>
+                        <input type="text" id="cwt_widths" class="input-field" value="3,5,7,9,11">
+                    </div>
+                    </div>
+                </div>
+            
+                <!-- ОДИН чекбокс таблицы для обоих методов -->
+                <div class="checkbox-group" style="margin-top:8px;">
+                    <label class="checkbox-label">
+                    <input type="checkbox" id="show_peak_table" class="checkbox-input">
+                    Показать таблицу пиков
+                    </label>
+                </div>
+                </div>
+            </div>
+        
+        
+            <!-- Display Options -->
+            <div class="parameter-group">
+                <h4 class="parameter-title">Отображение
+                    <span class="help-icon" data-tooltip="Управление отображением графиков: показывать все спектры или только статистические данные (среднее и стандартное отклонение).">?</span>
+                </h4>
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="show_only_mean_std" class="checkbox-input" title="Отображать только среднее и СКО">
+                        Только статистика
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="control-card control-card--actions">
+            <h3 class="control-title">Действия</h3>
+            <div class="action-buttons">
+                <button onclick="processAndPlot()" class="btn-action process-btn" title="Обработать данные и построить график">
+                    Обработать данные
+                </button>
+                <button onclick="downloadMeanSpectrum()" class="btn-action download-btn" title="Скачать средний спектр">
+                    Скачать среднее
+                </button>
+                <button onclick="downloadProcessedData()" class="btn-action download-btn" title="Скачать обработанные данные">
+                    Скачать все
+                </button>
+                <button onclick="analyzeWithAI()" class="btn-action ai-btn" title="Анализ с помощью AI">
+                    Анализ AI
+                </button>
+                <button onclick="clearAllSpectra()" class="btn-action clear-btn" title="Очистить все спектры">
+                    Очистить все
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="plot-area">
+        <div id="spectrum_plot"></div>
+        <div id="peak_table_container"></div>
+    </div>
+</div>
+
+<button id="theme-toggle" title="Переключить тему оформления">Тема</button>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  try {
+    document.documentElement.lang = 'ru';
+    document.title = 'Обработка спектров';
+    const fileText = document.querySelector('.file-input-text');
+    if (fileText) fileText.textContent = 'Перетащите файлы сюда или нажмите';
+    const fileCount = document.getElementById('file-count');
+    if (fileCount && !fileCount.textContent.trim()) fileCount.textContent = 'Файлы не выбраны';
+    const logoutBtn = document.querySelector('.logout-btn');
+    if (logoutBtn) logoutBtn.textContent = 'Выйти';
+    const guestText = document.querySelector('.guest-banner__text');
+    if (guestText) guestText.textContent = 'Гостевой режим: войдите или зарегистрируйтесь.';
+    const loginLink = document.querySelector('.guest-banner a[href="/login"]');
+    if (loginLink) loginLink.textContent = 'Войти';
+    const registerLink = document.querySelector('.guest-banner a[href="/register"]');
+    if (registerLink) registerLink.textContent = 'Зарегистрироваться';
+    const uploadTitle = document.querySelector('.control-card .control-title');
+    if (uploadTitle) uploadTitle.textContent = 'Загрузка файлов';
+    const uploadedCard = document.querySelector('.control-card--uploaded .control-title');
+    if (uploadedCard) uploadedCard.textContent = 'Загруженные файлы';
+    const presetsCard = document.querySelector('.presets-card .control-title');
+    if (presetsCard) presetsCard.textContent = 'Пресеты';
+    const presetsHint = document.getElementById('presets-hint');
+    if (presetsHint) presetsHint.textContent = presetsHint.textContent.includes('Войдите') ? 'Войдите, чтобы сохранять пресеты.' : 'Используйте слоты для сохранения и загрузки настроек.';
+    document.querySelectorAll('.preset-slot .preset-slot-label').forEach(function(el){
+      const slot = el.closest('.preset-slot')?.dataset.slot; if (slot) el.textContent = 'Слот ' + slot;
+    });
+    const lblWidth = document.querySelector('label[for="peak_width"]');
+    if (lblWidth) lblWidth.textContent = 'Ширина:';
+    const lblProm = document.querySelector('label[for="peak_prominence"]');
+    if (lblProm) lblProm.textContent = 'Выраженность:';
+    const peakTableLabel = document.querySelector('#show_peak_table')?.closest('label');
+    if (peakTableLabel) peakTableLabel.lastChild.textContent = ' Показать таблицу пиков';
+    const displayTitle = document.querySelector('.parameter-group .parameter-title');
+    if (displayTitle) displayTitle.textContent = 'Отображение';
+    const meanStdLabel = document.querySelector('label[for="show_only_mean_std"]');
+    if (meanStdLabel) meanStdLabel.lastChild.textContent = ' Только среднее/ст. отклонение';
+    const processBtn = document.querySelector('.process-btn');
+    if (processBtn) { processBtn.textContent = 'Обработать данные'; processBtn.title = 'Обработать и построить графики'; }
+    const downloadBtns = document.querySelectorAll('.download-btn');
+    if (downloadBtns[0]) { downloadBtns[0].textContent = 'Скачать средний спектр'; downloadBtns[0].title = 'Скачать усреднённый спектр'; }
+    if (downloadBtns[1]) { downloadBtns[1].textContent = 'Скачать данные'; downloadBtns[1].title = 'Скачать обработанные данные'; }
+    const aiBtn = document.querySelector('.ai-btn');
+    if (aiBtn) { aiBtn.textContent = 'Анализ AI'; aiBtn.title = 'Анализ с помощью AI'; }
+    const clearBtn = document.querySelector('.clear-btn');
+    if (clearBtn) { clearBtn.textContent = 'Очистить график'; clearBtn.title = 'Очистить область графика'; }
+    const themeBtn = document.getElementById('theme-toggle');
+    if (themeBtn) { themeBtn.textContent = 'Тема'; themeBtn.title = 'Переключить тему (светлая/тёмная)'; }
+    const h1 = document.querySelector('h1');
+    if (h1) h1.textContent = 'Обработка спектральных данных';
+  } catch(e) { console.warn('RU text patch failed', e); }
+});
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
