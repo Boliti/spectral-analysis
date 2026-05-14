@@ -4,71 +4,589 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Модуль анализа спектров</title>
+    <script>
+        document.documentElement.dataset.theme = localStorage.getItem("theme") === "dark" ? "dark" : "light";
+    </script>
     <link rel="stylesheet" href="/static/analysis.css">
     <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
-    <script defer src="/static/analysis.js"></script>
+    <script defer src="/static/analysis.js?v=analysis-engineering-workflow-1"></script>
 </head>
 <body>
 <div class="analysis-shell">
     <header class="topbar">
         <div>
-            <h1>Анализ спектров</h1>
-            <p class="muted">Обучение и применение сохранённых моделей</p>
+            <h1>Анализ спектральных данных</h1>
+            <p class="muted">Импорт, предобработка, визуализация и обучение моделей</p>
         </div>
-        <a href="/" class="btn btn-primary">Назад</a>
+        <div class="topbar-actions">
+            <button id="help-open-btn" class="btn btn-secondary">Справка</button>
+            <button id="theme-toggle-btn" class="btn btn-ghost" type="button">Тёмная тема</button>
+            <a href="/" class="btn btn-primary">Назад</a>
+        </div>
     </header>
-
-    <section class="major-block">
-        <h2 class="major-title">Блок 1. Создание моделей</h2>
-
-        <section class="card">
-            <h3>1) Загрузка спектров</h3>
-            <div class="line-controls">
-                <input id="train-file" type="file" accept=".csv,.txt">
-                <button id="preview-btn" class="btn btn-primary">Проверить файл</button>
+    <nav class="workflow-stepper" aria-label="Этапы анализа">
+        <button type="button" class="workflow-step workflow-tab workflow-tab--active" data-step="import" data-target-section="import-section"><span class="step-index">1</span><span class="step-label">Датасет</span><span class="step-state">active</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="check" data-target-section="dataset-ready-card"><span class="step-index">2</span><span class="step-label">Проверка</span><span class="step-state">not-started</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="preprocess" data-target-section="preprocessing-card"><span class="step-index">3</span><span class="step-label">Предобработка</span><span class="step-state">not-started</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="train" data-target-section="training-section"><span class="step-index">4</span><span class="step-label">Обучение</span><span class="step-state">not-started</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="models" data-target-section="models-section"><span class="step-index">5</span><span class="step-label">Модели</span><span class="step-state">not-started</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="results" data-target-section="results-section"><span class="step-index">6</span><span class="step-label">Результаты</span><span class="step-state">not-started</span></button>
+    </nav>
+    <div id="global-status" class="global-status" style="display:none;">
+        <div class="spinner"></div>
+        <div>
+            <strong id="global-status-title">Запрос отправлен на сервер</strong>
+            <div id="global-status-text">Дождитесь завершения обработки.</div>
+            <div class="progress"><div id="global-progress-bar" class="progress-bar"></div></div>
+        </div>
+    </div>
+    <div id="global-loading-indicator" class="global-loading-indicator" style="display:none;">
+        <div class="spinner"></div>
+        <span id="global-loading-text">Выполняется...</span>
+    </div>
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+    <dialog id="help-dialog" class="help-dialog">
+        <div class="help-header">
+            <h2>Справка по модулю анализа</h2>
+            <button id="help-close-btn" class="btn" type="button">Закрыть</button>
+        </div>
+        <div class="help-content">
+            <h3>Общий порядок работы</h3>
+            <p>Загрузите датасет, проверьте структуру и график, при необходимости примените предобработку, выберите цель анализа, запустите модель, затем посмотрите метрики, графики и скачайте результаты. Все запуски сохраняются в истории текущего пользователя.</p>
+            <h3>Режимы работы</h3>
+            <p>Полный сценарий показывает весь процесс. «Правильный датасет» подходит для готового CSV/XLSX. «Только предобработка» нужен для получения processed-версии. «Только обучение» оставляет импорт готового датасета и модели. «Применение сохранённой модели» показывает модели и prediction. «История экспериментов» открывает старые run, ZIP и удаление.</p>
+            <h3>Формат правильного датасета</h3>
+            <pre>sample_id | target | source_sheet | source_file | 473.50 | 474.10 | ...</pre>
+            <h3>Target</h3>
+            <p><strong>categorical</strong> — классификация. <strong>numeric</strong> — регрессия концентрации или числового параметра. Если target отсутствует, доступны PCA и кластеризация.</p>
+            <h3>Методы</h3>
+            <p>PCA показывает визуальную структуру. PLS-DA, SVM, Random Forest и Decision Tree решают классификацию. k-means и HCA ищут группы без target. PLS Regression и SVR предсказывают числовой target.</p>
+            <h3>Предобработка</h3>
+            <p>Baseline correction убирает фон, smoothing снижает шум, normalization приводит спектры к сопоставимому масштабу. Raw — исходные данные, processed — сохранённая обработанная версия.</p>
+            <h3>Результаты</h3>
+            <p>Для классификации выводятся accuracy, precision, recall, F1 и confusion matrix. Для регрессии — R2, RMSE, MAE, график факт/прогноз и остатки.</p>
+            <h3>Частые ошибки</h3>
+            <p>Нет target для supervised-метода, target не того типа, processed dataset ещё не создан, датасет слишком маленький, или новая спектральная сетка не совпадает с сеткой, на которой обучалась модель.</p>
+            <div class="line-controls wrap">
+                <button id="download-example-csv-btn" class="btn" type="button">Скачать пример правильного датасета</button>
+                <button id="download-template-xlsx-btn" class="btn" type="button">Скачать шаблон Excel</button>
             </div>
-            <div id="preview-result" class="result-box"></div>
+        </div>
+    </dialog>
+
+    <section class="card workflow-mode-card">
+        <h2>Режим работы</h2>
+        <div class="line-controls wrap">
+            <label>Что нужно сделать
+                <select id="workflow-mode" class="input-field">
+                    <option value="full">Полный сценарий</option>
+                    <option value="standard">У меня уже есть правильный датасет</option>
+                    <option value="preprocess">Только предобработка</option>
+                    <option value="train">Только обучение модели</option>
+                    <option value="infer">Применение сохранённой модели</option>
+                    <option value="history">История экспериментов</option>
+                </select>
+            </label>
+            <span id="workflow-mode-hint" class="muted">Показываются все блоки: импорт, предобработка, обучение, модели и результаты.</span>
+        </div>
+    </section>
+
+    <section class="major-block" id="import-section">
+        <h2 class="major-title">Импорт датасета</h2>
+
+        <section class="card" id="standard-import-card" style="display:none;">
+            <h3>Загрузить правильный датасет</h3>
+            <p class="muted">Формат: sample_id | target | source_sheet | source_file | 469.34 | 470.38 | ...</p>
+            <div class="line-controls wrap">
+                <input id="standard-dataset-file" type="file" accept=".csv,.xlsx,.xls">
+                <button id="standard-dataset-import-btn" class="btn btn-primary" type="button">Загрузить правильный датасет</button>
+            </div>
+            <div id="standard-dataset-result" class="result-box">Если файл уже приведён к единому виду, полный мастер импорта не нужен.</div>
+        </section>
+
+        <section class="card" id="import-result-card" style="display:none;">
+            <h3>Загрузка и предпросмотр</h3>
+            <div class="line-controls wrap">
+                <input id="dataset-files" type="file" accept=".xlsx,.xls,.csv,.txt,.esp,.zip" multiple>
+                <button id="dataset-preview-btn" class="btn btn-primary">Предпросмотр</button>
+            </div>
+            <div id="dataset-preview-result" class="result-box">Загрузите Excel, ZIP или набор TXT/CSV/ESP файлов.</div>
         </section>
 
         <section class="card">
-            <h3>2) Выбор модели и обучение</h3>
-            <div class="grid">
+            <h3>Структура датасета</h3>
+            <div class="layout-cards" id="dataset-layout-cards">
+                <button type="button" class="layout-card" data-layout="excel_rows">
+                    <strong>Спектры по строкам</strong>
+                    <span>Один спектр = одна строка.</span>
+                    <code>ID | group | 469.34 | 470.38 | ...</code>
+                </button>
+                <button type="button" class="layout-card" data-layout="excel_columns">
+                    <strong>Спектры по столбцам</strong>
+                    <span>Один спектр = один столбец.</span>
+                    <code>wavenumber | sample1 | sample2 | ...</code>
+                </button>
+                <button type="button" class="layout-card" data-layout="txt_folder">
+                    <strong>Папка или ZIP</strong>
+                    <span>Один TXT/CSV-файл = один спектр.</span>
+                    <code>L1/sample.txt, M1/sample.txt</code>
+                </button>
+            </div>
+            <select id="dataset-layout" class="input-field hidden-control">
+                <option value="excel_rows">Спектры по строкам</option>
+                <option value="excel_columns">Спектры по столбцам</option>
+                <option value="txt_folder">Папка или ZIP</option>
+                <option value="long_table" disabled>Длинный формат (планируется)</option>
+            </select>
+            <p id="dataset-auto-note" class="muted">Сначала нажмите «Предпросмотр»: система предложит подходящий тип и заполнит найденные поля.</p>
+
+            <details id="dataset-advanced-settings">
+                <summary>Показать расширенные настройки</summary>
+                <div class="grid">
+                    <label class="dataset-field" data-visible-for="excel_rows excel_columns">Лист Excel
+                        <span class="field-hint">Лист, из которого будут взяты строки или спектры.</span>
+                        <select id="dataset-sheet" class="input-field"></select>
+                    </label>
+                    <div class="dataset-field dataset-sheet-picker" data-visible-for="excel_rows excel_columns">
+                        <div class="field-label">Листы Excel</div>
+                        <span class="field-hint">Выберите один или несколько листов для импорта.</span>
+                        <div class="line-controls wrap">
+                            <button id="dataset-sheets-select-all" class="btn" type="button">Выбрать все</button>
+                            <button id="dataset-sheets-clear" class="btn" type="button">Снять все</button>
+                        </div>
+                        <div id="dataset-sheets-checkboxes" class="checkbox-list"></div>
+                        <select id="dataset-sheets" class="input-field hidden-control" multiple size="3"></select>
+                    </div>
+                    <label class="dataset-field" data-visible-for="excel_rows excel_columns">Как использовать выбранные листы
+                        <span class="field-hint">Для Raman_krov_SSZ-zdorovye.xlsx используйте «Каждый лист = отдельный класс».</span>
+                        <select id="dataset-sheet-mode" class="input-field">
+                            <option value="sheet_as_class">Каждый лист = отдельный класс</option>
+                            <option value="merge">Объединить выбранные листы в один датасет</option>
+                            <option value="single_sheet">Использовать только один лист</option>
+                        </select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_rows">ID-колонка
+                        <span class="field-hint">Колонка, по которой определяется имя или номер образца.</span>
+                        <select id="dataset-id-column" class="input-field"></select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_rows">Target-колонка
+                        <span class="field-hint">Колонка с классом или значением, которое модель должна предсказывать.</span>
+                        <select id="dataset-target-column" class="input-field"></select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_columns">Колонка спектральной оси
+                        <span class="field-hint">Колонка с волновыми числами или длинами волн. Используется только если спектры расположены по столбцам.</span>
+                        <select id="dataset-axis-column" class="input-field"></select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="txt_folder">X-колонка
+                        <span class="field-hint">Для TXT/CSV обычно первая числовая колонка: #Wave.</span>
+                        <input id="dataset-x-column" class="input-field" type="text" value="#Wave">
+                    </label>
+                    <label class="dataset-field" data-visible-for="txt_folder">Intensity-колонка
+                        <span class="field-hint">Для TXT/CSV обычно вторая числовая колонка: #Intensity.</span>
+                        <input id="dataset-y-column" class="input-field" type="text" value="#Intensity">
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_rows excel_columns txt_folder">Target-источник
+                        <span class="field-hint">Откуда брать классы/целевые значения.</span>
+                        <select id="dataset-target-source" class="input-field">
+                            <option value="column">Колонка таблицы</option>
+                            <option value="sheet_name">Имя листа Excel</option>
+                            <option value="folder_name">Имя папки</option>
+                            <option value="file_name">Имя файла</option>
+                            <option value="manual">Один общий класс</option>
+                            <option value="none">Без target</option>
+                        </select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_columns txt_folder" data-target-source-field="manual">Общий класс
+                        <span class="field-hint">Используется, если всем спектрам нужно назначить один класс.</span>
+                        <input id="dataset-manual-target" class="input-field" type="text" placeholder="Например, control">
+                    </label>
+                    <label class="dataset-field" data-visible-for="excel_columns txt_folder">Общая спектральная сетка
+                        <span class="field-hint">Если оси отличаются, спектры можно привести к общей сетке.</span>
+                        <select id="dataset-grid-mode" class="input-field">
+                            <option value="intersection">Пересечение диапазонов</option>
+                            <option value="first_axis">Ось первого спектра</option>
+                            <option value="manual">Задать вручную</option>
+                            <option value="cancel">Отменить импорт при разных осях</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="subcard">
+                    <h4>Параметры измерений</h4>
+                    <p class="muted">Необязательно. Эти данные сохраняются в metadata датасета, config JSON и metadata модели.</p>
+                    <div class="grid">
+                        <label>Ширина входной щели
+                            <input id="meta-slit-width" class="input-field" type="text" placeholder="Например, 50 мкм">
+                        </label>
+                        <label>Штрихов решётки, lines/mm
+                            <input id="meta-grating-lines" class="input-field" type="number" min="1" placeholder="Например, 1200">
+                        </label>
+                        <label>Длина волны лазера
+                            <input id="meta-laser-wavelength" class="input-field" type="text" placeholder="Например, 785 нм">
+                        </label>
+                        <label>Время интеграции
+                            <input id="meta-integration-time" class="input-field" type="text" placeholder="Например, 10 s">
+                        </label>
+                        <label>Число накоплений
+                            <input id="meta-accumulation-count" class="input-field" type="number" min="1">
+                        </label>
+                        <label>Спектрометр
+                            <input id="meta-spectrometer-name" class="input-field" type="text" placeholder="Название прибора">
+                        </label>
+                    </div>
+                </div>
+                <p class="muted" id="dataset-feature-hint">Спектральные признаки будут определены автоматически.</p>
+            </details>
+
+            <div id="dataset-check-summary" class="result-box">Проверка перед импортом появится после предпросмотра.</div>
+            <div class="line-controls wrap">
+                <button id="dataset-import-btn" class="btn btn-primary">Всё верно, импортировать датасет</button>
+                <button id="dataset-validate-btn" class="btn">Проверить настройки</button>
+            </div>
+        </section>
+
+        <section class="card" id="dataset-ready-card" style="display:none;">
+            <h3>Датасет готов к анализу</h3>
+            <div id="dataset-ready-summary" class="result-box"></div>
+            <div class="line-controls wrap dataset-main-actions">
+                <button id="dataset-use-btn" class="btn btn-primary" title="Использовать активный датасет в блоке обучения">Использовать для обучения модели</button>
+                <button id="dataset-show-plot-btn" class="btn" title="Показать несколько спектров для визуальной проверки">Показать график датасета</button>
+                <button id="dataset-export-csv-btn" class="btn" title="CSV — для повторной загрузки и анализа">Скачать правильный CSV</button>
+                <button id="dataset-export-xlsx-btn" class="btn" title="XLSX — для просмотра в Excel">Скачать правильный XLSX</button>
+                <button id="dataset-reset-btn" class="btn">Импортировать другой датасет</button>
+            </div>
+            <label id="standard-preprocess-toggle-wrap" class="compact-toggle" style="display:none;">
+                <input id="standard-apply-preprocessing" type="checkbox">
+                применить стандартную предобработку перед обучением
+            </label>
+            <div id="compact-preprocessing-row" class="compact-preprocessing-row" style="display:none;">
+                <strong>Предобработка: не применяется</strong>
+                <div class="line-controls wrap">
+                    <button id="compact-preprocessing-plot-btn" class="btn btn-secondary" type="button">Показать график</button>
+                    <button id="show-preprocessing-settings-btn" class="btn btn-secondary" type="button">Открыть настройки предобработки</button>
+                </div>
+            </div>
+            <details class="export-details">
+                <summary>Дополнительный экспорт</summary>
+                <div class="line-controls wrap">
+                    <button id="dataset-export-zip-btn" class="btn" title="ZIP — полный пакет данных и настроек">Скачать ZIP-пакет</button>
+                    <button id="dataset-export-processed-csv-btn" class="btn" disabled title="Processed CSV — обработанная версия для анализа">Скачать processed CSV</button>
+                    <button id="dataset-export-processed-xlsx-btn" class="btn" disabled title="Processed XLSX — обработанная версия для Excel">Скачать processed XLSX</button>
+                    <button id="dataset-export-processed-zip-btn" class="btn" disabled title="Processed ZIP — обработанные данные и настройки">Скачать processed ZIP</button>
+                    <button id="dataset-metadata-download-btn" class="btn" title="JSON — summary и metadata датасета">Скачать metadata JSON</button>
+                    <button id="dataset-config-download-btn" class="btn" title="JSON — техническая конфигурация импорта">Скачать config JSON</button>
+                    <button id="preprocessing-config-download-btn" class="btn" disabled title="JSON — параметры предобработки">Скачать preprocessing JSON</button>
+                </div>
+            </details>
+        </section>
+
+        <section class="card" id="preprocessing-card" style="display:none;">
+            <h3>Предобработка перед анализом</h3>
+            <p class="muted">Предпросмотр не изменяет датасет. Чтобы использовать обработанные данные в анализе, нажмите «Применить и сохранить обработанную версию».</p>
+            <div class="preset-cards">
+                <button type="button" class="preprocess-preset-card preset-card preset-card--active" data-preset="none">
+                    <div class="preset-title">Без предобработки</div>
+                    <div class="preset-description">Исходные спектры без изменений.</div>
+                    <div class="preset-badges"><span>RAW</span></div>
+                </button>
+                <button type="button" class="preprocess-preset-card preset-card" data-preset="raman_standard">
+                    <div class="preset-title">Стандартная Raman</div>
+                    <div class="preset-description">Коррекция фона, сглаживание и SNV-нормализация.</div>
+                    <div class="preset-badges"><span>ALS</span><span>Savitzky-Golay</span><span>SNV</span></div>
+                </button>
+                <button type="button" class="preprocess-preset-card preset-card" data-preset="noisy">
+                    <div class="preset-title">Шумные спектры</div>
+                    <div class="preset-description">Подавление фона и мягкое сглаживание шумных сигналов.</div>
+                    <div class="preset-badges"><span>ALS</span><span>Gaussian</span><span>Max</span></div>
+                </button>
+                <button type="button" class="preprocess-preset-card preset-card" data-preset="class_comparison">
+                    <div class="preset-title">Сравнение классов</div>
+                    <div class="preset-description">Единая обработка для сопоставления групп спектров.</div>
+                    <div class="preset-badges"><span>ALS</span><span>Savitzky-Golay</span><span>SNV</span></div>
+                </button>
+                <button type="button" class="preprocess-preset-card preset-card" data-preset="custom">
+                    <div class="preset-title">Свои настройки</div>
+                    <div class="preset-description">Ручной выбор методов и параметров.</div>
+                    <div class="preset-badges"><span>Manual</span></div>
+                </button>
+            </div>
+            <select id="preprocessing-preset" class="hidden-control">
+                <option value="none">Без предобработки</option>
+                <option value="raman_standard">Стандартная Raman</option>
+                <option value="noisy">Шумные спектры</option>
+                <option value="class_comparison">Сравнение классов</option>
+                <option value="custom">Свои настройки</option>
+            </select>
+
+            <div class="processing-blocks">
+                <label><input type="checkbox" id="block-data-check" checked> Загрузка и проверка данных</label>
+                <label><input type="checkbox" id="block-baseline"> Коррекция базовой линии</label>
+                <label><input type="checkbox" id="block-smoothing"> Сглаживание</label>
+                <label><input type="checkbox" id="block-normalization"> Нормализация</label>
+                <label><input type="checkbox" id="block-peaks"> Поиск пиков</label>
+                <label><input type="checkbox" id="block-pca"> Разведочный анализ PCA</label>
+                <label><input type="checkbox" id="block-model-compare"> Сравнение моделей</label>
+                <label><input type="checkbox" id="block-export" checked> Экспорт результатов</label>
+            </div>
+
+            <details id="preprocessing-advanced">
+                <summary>Показать расширенные настройки</summary>
+                <div class="grid">
+                    <label>Коррекция базовой линии
+                        <span class="field-hint">ALS удаляет плавный фон спектра, часто возникающий из-за флуоресценции.</span>
+                        <select id="pre-baseline-method" class="input-field">
+                            <option value="off">Выключено</option>
+                            <option value="als">ALS</option>
+                            <option value="polynomial">Polynomial</option>
+                            <option value="rolling_ball">Rolling Ball</option>
+                        </select>
+                    </label>
+                    <label>Сглаживание
+                        <span class="field-hint">Savitzky-Golay уменьшает шум и сохраняет форму пиков.</span>
+                        <select id="pre-smoothing-method" class="input-field">
+                            <option value="off">Выключено</option>
+                            <option value="savgol">Savitzky-Golay</option>
+                            <option value="gaussian">Gaussian</option>
+                            <option value="moving_average">Moving Average</option>
+                            <option value="whittaker">Whittaker</option>
+                        </select>
+                    </label>
+                    <label>Нормализация
+                        <span class="field-hint">SNV помогает сравнивать спектры разной интенсивности.</span>
+                        <select id="pre-normalization-method" class="input-field">
+                            <option value="off">Выключено</option>
+                            <option value="snv">SNV</option>
+                            <option value="max">По максимуму</option>
+                            <option value="vector">Векторная</option>
+                            <option value="area">По площади</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="grid preprocessing-params">
+                    <label data-pre-param="als">ALS lambda <input id="pre-als-lambda" class="input-field" type="number" value="100000" step="1000"></label>
+                    <label data-pre-param="als">ALS p <input id="pre-als-p" class="input-field" type="number" value="0.01" step="0.01" min="0.001" max="0.999"></label>
+                    <label data-pre-param="als">ALS iterations <input id="pre-als-iterations" class="input-field" type="number" value="10" min="1"></label>
+                    <label data-pre-param="polynomial">Polynomial degree <input id="pre-poly-degree" class="input-field" type="number" value="3" min="1"></label>
+                    <label data-pre-param="polynomial">Polynomial iterations <input id="pre-poly-iterations" class="input-field" type="number" value="10" min="1"></label>
+                    <label data-pre-param="polynomial">Polynomial asymmetry <input id="pre-poly-asymmetry" class="input-field" type="number" value="0.01" step="0.01" min="0.001" max="1"></label>
+                    <label data-pre-param="rolling_ball">Rolling radius <input id="pre-rolling-radius" class="input-field" type="number" value="50" min="1"></label>
+                    <label data-pre-param="rolling_ball">Rolling units
+                        <select id="pre-rolling-units" class="input-field">
+                            <option value="x">spectral_axis</option>
+                            <option value="points">points</option>
+                        </select>
+                    </label>
+                    <label data-pre-param="savgol">SG window_length <input id="pre-sg-window" class="input-field" type="number" value="15" min="3" step="2"></label>
+                    <label data-pre-param="savgol">SG polyorder <input id="pre-sg-polyorder" class="input-field" type="number" value="3" min="1"></label>
+                    <label data-pre-param="gaussian">Gaussian sigma <input id="pre-gaussian-sigma" class="input-field" type="number" value="2" min="0.1" step="0.1"></label>
+                    <label data-pre-param="moving_average">Moving window <input id="pre-ma-window" class="input-field" type="number" value="5" min="2"></label>
+                    <label data-pre-param="whittaker">Whittaker lambda <input id="pre-whittaker-lambda" class="input-field" type="number" value="1000" min="1"></label>
+                    <label data-pre-param="whittaker">Whittaker order <input id="pre-whittaker-order" class="input-field" type="number" value="2" min="1"></label>
+                    <label>Обрезать диапазон
+                        <select id="pre-crop-enabled" class="input-field">
+                            <option value="false">Нет</option>
+                            <option value="true">Да</option>
+                        </select>
+                    </label>
+                    <label data-pre-param="crop">min_axis <input id="pre-crop-min" class="input-field" type="number" step="0.01"></label>
+                    <label data-pre-param="crop">max_axis <input id="pre-crop-max" class="input-field" type="number" step="0.01"></label>
+                </div>
+            </details>
+            <details id="peaks-block-settings" style="display:none;">
+                <summary>Параметры поиска пиков</summary>
+                <div class="grid">
+                    <label>Метод поиска пиков
+                        <select id="peak-method" class="input-field">
+                            <option value="find_peaks">find_peaks</option>
+                            <option value="second_derivative">вторая производная</option>
+                        </select>
+                    </label>
+                    <label>width <input id="peak-width" class="input-field" type="number" value="1" min="1"></label>
+                    <label>prominence <input id="peak-prominence" class="input-field" type="number" value="1" min="0" step="0.1"></label>
+                </div>
+            </details>
+            <div class="line-controls wrap">
+                <button id="save-analysis-config-btn" class="btn" type="button">Сохранить конфигурацию</button>
+                <button id="download-analysis-config-btn" class="btn" type="button">Скачать конфигурацию</button>
+                <input id="load-analysis-config-file" type="file" accept=".json">
+                <button id="load-analysis-config-btn" class="btn" type="button">Загрузить конфигурацию</button>
+            </div>
+            <div class="line-controls wrap">
+                <button id="preprocessing-preview-btn" class="btn">Предпросмотр: как изменятся спектры</button>
+                <button id="preprocessing-apply-btn" class="btn btn-primary">Применить и сохранить обработанную версию</button>
+            </div>
+            <div id="preprocessing-result" class="result-note"></div>
+            <div id="preprocessing-config-view" class="result-box"></div>
+            <div class="line-controls wrap">
+                <label>Масштаб
+                    <select id="pre-plot-scale" class="input-field">
+                        <option value="autoscale">Автомасштаб по каждому графику</option>
+                        <option value="shared_y">Единая шкала Y</option>
+                        <option value="view_normalized">Нормировать только для просмотра</option>
+                    </select>
+                </label>
+                <label>Линий на графике
+                    <select id="pre-plot-limit" class="input-field">
+                        <option value="5">5</option>
+                        <option value="3">3</option>
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="all">Все</option>
+                    </select>
+                </label>
+                <label>Стратегия выбора
+                    <select id="pre-plot-strategy" class="input-field">
+                        <option value="balanced_by_class">Равномерно по классам</option>
+                        <option value="random">Случайные спектры</option>
+                        <option value="first_n">Первые N</option>
+                    </select>
+                </label>
+                <label>Показывать
+                    <select id="pre-plot-visibility" class="input-field">
+                        <option value="before_after">До/после</option>
+                        <option value="raw_only">Только исходные</option>
+                        <option value="processed_only">Только обработанные</option>
+                        <option value="class_means">Средние по классам</option>
+                    </select>
+                </label>
+            </div>
+            <div id="preprocessing-plot" class="plot-box"></div>
+        </section>
+
+        <section class="card">
+            <h3>Результат импорта</h3>
+            <div id="dataset-validation-result" class="result-note"></div>
+            <div id="dataset-summary" class="result-box"></div>
+            <div id="dataset-plot" class="plot-box"></div>
+        </section>
+    </section>
+
+    <section class="major-block" id="training-section">
+        <h2 class="major-title">Обучение модели</h2>
+
+        <section class="card">
+            <h3>Источник данных</h3>
+            <div id="active-dataset-badge" class="loaded-badge loaded-badge--empty">Импортированный датасет не выбран. Можно загрузить файл вручную.</div>
+            <div class="line-controls" id="manual-train-upload-row">
+                <input id="train-file" type="file" accept=".csv,.txt,.esp,.xlsx,.xls">
+                <button id="preview-btn" class="btn btn-primary">Проверить файл</button>
+            </div>
+            <div id="preview-result" class="result-box">Поддерживаются CSV, TXT, ESP и XLSX/XLS с числовыми парами x y или матрицей интенсивностей.</div>
+            <div id="analysis-recommendations" class="result-box">После импорта здесь появятся рекомендуемые методы анализа.</div>
+        </section>
+
+        <section class="card">
+            <h3>Настройки анализа</h3>
+            <div class="line-controls wrap">
+                <label>Режим настройки
+                    <select id="model-config-mode" class="input-field">
+                        <option value="simple">Простой режим</option>
+                        <option value="advanced">Расширенный режим</option>
+                    </select>
+                </label>
+                <label>Цель анализа
+                    <select id="analysis-goal" class="input-field">
+                        <option value="explore">Визуально изучить структуру данных</option>
+                        <option value="classify">Классифицировать спектры</option>
+                        <option value="cluster">Найти группы без заранее заданных классов</option>
+                        <option value="regress">Предсказать концентрацию / числовой параметр</option>
+                        <option value="compare_regression">Сравнить регрессионные модели</option>
+                        <option value="compare">Сравнить методы</option>
+                    </select>
+                </label>
+            </div>
+            <p id="target-source-note" class="loaded-badge loaded-badge--ok" style="display:none;"></p>
+            <p id="auto-model-note" class="muted">Параметры будут подобраны автоматически. Их можно изменить в расширенных настройках.</p>
+            <div class="grid model-advanced-field">
                 <label>Тип модели
                     <select id="model-type" class="input-field">
                         <option value="pca">PCA</option>
-                        <option value="pls">PLS (регрессия)</option>
                         <option value="plsda">PLS-DA (классификация)</option>
-                        <option value="mcr_als">MCR-ALS (stub)</option>
+                        <option value="pls">PLS Regression</option>
+                        <option value="svm">SVM (классификация)</option>
+                        <option value="random_forest">Random Forest</option>
+                        <option value="decision_tree">Decision Tree</option>
+                        <option value="kmeans">k-means</option>
+                        <option value="hca">HCA</option>
+                        <option value="svr">SVR</option>
+                        <option value="compare_classification">Сравнить классификаторы</option>
+                        <option value="compare_regression">Сравнить регрессоры</option>
+                        <option value="compare_clustering">Сравнить кластеризацию</option>
                     </select>
                 </label>
                 <label>Название модели
                     <input id="model-name" class="input-field" type="text" placeholder="Например, pca_plasma_batch_01">
                 </label>
-                <label>n_components
+                <label data-model-param="n_components">n_components
                     <input id="n-components" class="input-field" type="number" min="1" placeholder="2">
+                </label>
+                <label data-model-param="n_clusters">n_clusters
+                    <input id="model-n-clusters" class="input-field" type="number" min="2" value="2">
+                </label>
+                <label data-model-param="kernel">kernel
+                    <select id="model-kernel" class="input-field">
+                        <option value="rbf">rbf</option>
+                        <option value="linear">linear</option>
+                        <option value="poly">poly</option>
+                        <option value="sigmoid">sigmoid</option>
+                    </select>
+                </label>
+                <label data-model-param="C">C
+                    <input id="model-c" class="input-field" type="number" min="0.01" step="0.1" value="1.0">
+                </label>
+                <label data-model-param="gamma">gamma
+                    <input id="model-gamma" class="input-field" type="text" value="scale">
+                </label>
+                <label data-model-param="epsilon">epsilon
+                    <input id="model-epsilon" class="input-field" type="number" min="0" step="0.05" value="0.1">
+                </label>
+                <label data-model-param="n_estimators">n_estimators
+                    <input id="model-n-estimators" class="input-field" type="number" min="1" step="10" value="200">
+                </label>
+                <label data-model-param="max_depth">max_depth
+                    <input id="model-max-depth" class="input-field" type="number" min="1" placeholder="без ограничения">
+                </label>
+                <label data-model-param="class_weight">class_weight
+                    <select id="model-class-weight" class="input-field">
+                        <option value="">none</option>
+                        <option value="balanced">balanced</option>
+                    </select>
+                </label>
+                <label data-model-param="linkage">linkage
+                    <select id="model-linkage" class="input-field">
+                        <option value="ward">ward</option>
+                        <option value="complete">complete</option>
+                        <option value="average">average</option>
+                        <option value="single">single</option>
+                    </select>
                 </label>
             </div>
 
-            <label id="targets-wrap">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
+            <label id="targets-wrap" class="model-advanced-field">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
                 <textarea id="target-values" class="input-field" rows="3" placeholder="0,0,0,1,1,1"></textarea>
             </label>
-            <div class="line-controls wrap" id="targets-import-wrap">
+            <div class="line-controls wrap model-advanced-field" id="targets-import-wrap">
                 <input id="targets-file" type="file" accept=".txt,.csv">
                 <button id="load-targets-btn" class="btn">Подставить targets в поле</button>
                 <span id="targets-file-hint" class="muted"></span>
             </div>
 
-            <div class="grid">
-                <label>Валидация
+            <div class="grid model-advanced-field">
+                <label>Какие данные использовать
+                    <select id="train-dataset-version" class="input-field">
+                        <option value="raw">Исходный датасет</option>
+                        <option value="processed" disabled>Предобработанный датасет</option>
+                    </select>
+                </label>
+                <label data-model-param="validation">Валидация
                     <select id="do-validation" class="input-field">
                         <option value="true">Включена (train/test)</option>
                         <option value="false">Выключена</option>
                     </select>
                 </label>
-                <label>test_size (0.1 - 0.5)
+                <label data-model-param="test_size">test_size (0.1 - 0.5)
                     <input id="test-size" class="input-field" type="number" min="0.1" max="0.5" step="0.05" value="0.3">
                 </label>
-                <label>random_state
+                <label data-model-param="random_state">random_state
                     <input id="random-state" class="input-field" type="number" step="1" value="42">
                 </label>
             </div>
@@ -77,23 +595,23 @@
         </section>
     </section>
 
-    <section class="major-block">
-        <h2 class="major-title">Блок 2. Работа с сохранёнными моделями</h2>
+    <section class="major-block" id="models-section">
+        <h2 class="major-title">Модели и применение</h2>
 
-        <section class="card">
-            <h3>3) Сохранённые модели</h3>
+        <section class="card" id="infer-section">
+            <h3>Сохранённые модели</h3>
             <div class="line-controls wrap">
                 <button id="refresh-models-btn" class="btn">Обновить список</button>
-                <button id="load-model-btn" class="btn btn-primary">Загрузить выбранную модель</button>
-                <button id="delete-model-btn" class="btn btn-danger">Удалить выбранную модель</button>
             </div>
             <div id="loaded-model-badge" class="loaded-badge loaded-badge--empty">Модель не загружена</div>
             <div id="models-list" class="models-list"></div>
+            <div id="model-metadata-card" class="metadata-card" style="display:none;"></div>
 
-            <div class="subcard">
-                <h4>Загрузка собственной модели</h4>
+            <details class="subcard">
+                <summary>Загрузка собственной модели (для доверенной локальной среды)</summary>
+                <p class="muted">Внешние joblib-модели небезопасны для публичного сервера. Используйте этот блок только локально, если включён ALLOW_MODEL_UPLOADS.</p>
                 <div class="grid">
-                    <label>Файл модели (.joblib)
+                    <label>Файл модели (.joblib, только доверенная среда)
                         <input id="upload-model-file" type="file" accept=".joblib">
                     </label>
                     <label>Файл метаданных (.json, опционально)
@@ -104,7 +622,6 @@
                             <option value="pca">pca</option>
                             <option value="pls">pls</option>
                             <option value="plsda">plsda</option>
-                            <option value="mcr_als">mcr_als</option>
                         </select>
                     </label>
                 </div>
@@ -112,28 +629,55 @@
                     <input id="upload-model-name" class="input-field" type="text" placeholder="Название модели (опционально)">
                     <button id="upload-model-btn" class="btn">Загрузить модель на сервер</button>
                 </div>
-            </div>
+            </details>
         </section>
 
-        <section class="card">
-            <h3>4) Применение модели к новым данным</h3>
+        <section class="card" id="model-apply-card">
+            <h3>Применение модели к новым данным</h3>
             <div class="line-controls wrap">
-                <input id="infer-file" type="file" accept=".csv,.txt" multiple>
+                <input id="infer-file" type="file" accept=".csv,.txt,.esp,.xlsx,.xls" multiple>
                 <button id="infer-btn" class="btn btn-primary">Применить модель к выбранным файлам</button>
             </div>
             <div id="infer-files-hint" class="muted"></div>
         </section>
 
-        <section class="card">
-            <h3>5) Результаты</h3>
-            <div id="result-explainer" class="result-note"></div>
-            <div id="validation-summary" class="metrics-grid"></div>
-            <div id="validation-plot" class="plot-box plot-box-small"></div>
-            <div id="plot" class="plot-box"></div>
-            <details class="raw-json-wrap">
-                <summary>Показать сырой JSON ответа</summary>
-                <pre id="text-result" class="result-box"></pre>
-            </details>
+        <section class="card" id="results-section" style="display:none;">
+            <h3>Результаты</h3>
+            <div class="result-tabs" role="tablist" aria-label="Разделы результата">
+                <button type="button" class="result-tab result-tab--active" data-result-tab="summary">Сводка</button>
+                <button type="button" class="result-tab" data-result-tab="metrics">Метрики</button>
+                <button type="button" class="result-tab" data-result-tab="plots">Графики</button>
+                <button type="button" class="result-tab" data-result-tab="download">Скачать</button>
+                <button type="button" class="result-tab" data-result-tab="json">JSON</button>
+            </div>
+            <div class="result-panel" data-result-panel="summary">
+                <div id="result-explainer" class="result-note"></div>
+            </div>
+            <div class="result-panel" data-result-panel="metrics" style="display:none;">
+                <div id="validation-summary" class="metrics-grid"></div>
+                <div id="comparison-result" class="result-box"></div>
+            </div>
+            <div class="result-panel" data-result-panel="plots" style="display:none;">
+                <div id="validation-plot" class="plot-box plot-box-small"></div>
+                <div id="plot" class="plot-box"></div>
+            </div>
+            <div class="result-panel" data-result-panel="download" style="display:none;">
+                <div id="result-downloads" class="line-controls wrap"></div>
+            </div>
+            <div class="result-panel" data-result-panel="json" style="display:none;">
+                <details id="raw-json-wrap" class="raw-json-wrap" style="display:none;">
+                    <summary>Показать сырой JSON ответа</summary>
+                    <pre id="text-result" class="result-box"></pre>
+                </details>
+            </div>
+        </section>
+
+        <section class="card" id="runs-section">
+            <h3>История экспериментов</h3>
+            <div class="line-controls wrap">
+                <button id="refresh-runs-btn" class="btn" type="button">Обновить историю</button>
+            </div>
+            <div id="runs-list" class="models-list"></div>
         </section>
     </section>
 </div>

@@ -8,7 +8,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
@@ -27,19 +26,16 @@ users.db
 *.db
 *.sqlite
 *.sqlite3
-*.mb
-*.mdb
-*.accdb
 uploads/*
 !uploads/.gitkeep
+user_data/*
+!user_data/.gitkeep
 datasets/*
 !datasets/.gitkeep
 saved_models/*
 !saved_models/.gitkeep
 saved_runs/*
 !saved_runs/.gitkeep
-user_data/*
-!user_data/.gitkeep
 results/experiments/*
 !results/experiments/.gitkeep
 results/configs/*
@@ -62,6 +58,7 @@ temp/
 .vscode/
 .idea/
 .codex
+.ipynb_checkpoints/
 
 # OS metadata
 .DS_Store

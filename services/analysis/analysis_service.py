@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
+    adjusted_rand_score,
     confusion_matrix,
     f1_score,
     mean_absolute_error,
     mean_squared_error,
+    normalized_mutual_info_score,
     precision_score,
     r2_score,
     recall_score,
@@ -22,6 +25,10 @@ from services.analysis.spectrum_loader import SpectrumDataset, parse_spectrum_fi
 from services.analysis.visualization import class_count_plot, pca_plot, pls_regression_plot, residual_plot
 
 
+def _timestamp_name() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 class AnalysisService:
     def __init__(self, model_root: Path):
         self.model_manager = ModelManager(model_root)
@@ -32,10 +39,65 @@ class AnalysisService:
 
     @staticmethod
     def _parse_supervised_targets(model_type: str, raw_targets: Optional[str], sample_count: int) -> Optional[np.ndarray]:
-        normalized = model_type.lower()
-        if normalized in {"pls", "plsda", "pls-da"}:
+        normalized = model_type.lower().replace("-", "_")
+        if normalized in {
+            "pca",
+            "pls",
+            "pls_regression",
+            "plsda",
+            "pls_da",
+            "svm",
+            "svc",
+            "random_forest",
+            "rf",
+            "decision_tree",
+            "dt",
+            "svr",
+            "kmeans",
+            "k_means",
+            "hca",
+            "hierarchical",
+        } and raw_targets:
             return parse_target_values(raw_targets, sample_count)
         return None
+
+    @staticmethod
+    def _normalize_model_type(model_type: str) -> str:
+        normalized = model_type.strip().lower().replace("-", "_")
+        aliases = {
+            "pls_regression": "pls",
+            "pls_da": "plsda",
+            "svc": "svm",
+            "rf": "random_forest",
+            "dt": "decision_tree",
+            "k_means": "kmeans",
+            "hierarchical": "hca",
+        }
+        return aliases.get(normalized, normalized)
+
+    @staticmethod
+    def _task_type(model_type: str) -> str:
+        normalized = AnalysisService._normalize_model_type(model_type)
+        if normalized == "pca":
+            return "visualization"
+        if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
+            return "classification"
+        if normalized in {"pls", "svr"}:
+            return "regression"
+        if normalized in {"kmeans", "hca"}:
+            return "clustering"
+        return "analysis"
+
+    @staticmethod
+    def _target_kind(y: Optional[np.ndarray]) -> str:
+        if y is None:
+            return "none"
+        try:
+            numeric = np.asarray(y, dtype=float)
+            unique = len(np.unique(numeric))
+            return "numeric" if unique > max(10, int(len(numeric) * 0.1)) else "categorical"
+        except ValueError:
+            return "categorical"
 
     def train_and_save(
         self,
@@ -47,47 +109,180 @@ class AnalysisService:
         do_validation: bool = True,
         test_size: float = 0.3,
         random_state: int = 42,
+        model_params: Optional[Dict[str, Any]] = None,
+        metadata_extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         x = dataset.x
         y = self._parse_supervised_targets(model_type, raw_targets, dataset.sample_count)
+        self._validate_method_inputs(model_type=model_type, x=x, y=y)
 
-        normalized_model_type = model_type.strip().lower().replace("-", "")
-        validation = self._run_validation(
+        normalized_model_type = self._normalize_model_type(model_type)
+        params = self._default_model_params(
             model_type=normalized_model_type,
             x=x,
             y=y,
             n_components=n_components,
+            random_state=random_state,
+            provided=model_params,
+        )
+        validation = self._run_validation(
+            model_type=normalized_model_type,
+            x=x,
+            y=y,
+            n_components=params.get("n_components"),
+            model_params=params,
             do_validation=do_validation,
             test_size=test_size,
             random_state=random_state,
         )
 
-        model = create_model(model_type=model_type, n_components=n_components)
+        model = create_model(model_type=model_type, n_components=params.get("n_components"), model_params=params)
         model.fit(x, y)
         result = model.training_result(x, y)
+        if y is not None:
+            result["target"] = [str(value) for value in np.asarray(y).tolist()]
+        if dataset.sample_names:
+            result["sample_ids"] = dataset.sample_names
+        task_type = self._task_type(model.model_type)
+        metrics = self._extract_metrics(model.model_type, result, validation)
 
+        timestamp_name = _timestamp_name()
+        display_name = (model_name or "").strip() or f"{model.model_type}_{timestamp_name}"
         metadata = {
-            "model_name": (model_name or "").strip() or "Untitled model",
+            "model_name": display_name,
+            "display_name": display_name,
+            "task_type": task_type,
+            "input_shape": [int(dataset.sample_count), int(dataset.feature_count)],
             "feature_count": dataset.feature_count,
             "sample_count": dataset.sample_count,
             "source_format": dataset.source_format,
+            "file_format": dataset.file_format,
+            "preprocessing": {},
+            "classes": result.get("classes", []),
             "params": model.get_params(),
+            "model_params": params,
+            "target_type": self._target_kind(y),
             "validation_config": {
                 "enabled": bool(do_validation),
                 "test_size": float(max(0.1, min(0.5, test_size))),
                 "random_state": int(random_state),
             },
+            "validation": validation,
+            "metrics": metrics,
         }
+        if metadata_extra:
+            metadata.update(metadata_extra)
 
         saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata)
-        plot = self._build_plot(model.model_type, result, phase="training")
+        plots = self._build_plots(model.model_type, result, phase="training")
+        plot = plots[0] if plots else {}
+        prediction_rows = self._training_prediction_rows(result, dataset.sample_names)
 
         return {
+            "model_type": model.model_type,
+            "model_name": metadata["model_name"],
+            "task_type": task_type,
             "saved_model": saved,
             "result": result,
+            "summary": {
+                "n_samples": int(dataset.sample_count),
+                "n_features": int(dataset.feature_count),
+                "target_type": metadata["target_type"],
+                "task_type": task_type,
+            },
+            "metrics": metrics,
+            "predictions": prediction_rows or result.get("y_pred") or result.get("cluster_labels") or result.get("scores") or result.get("y_pred"),
             "validation": validation,
             "plot": plot,
+            "plots": plots,
+            "model_metadata": saved,
+            "warnings": validation.get("warnings", []) if isinstance(validation, dict) else [],
         }
+
+    def _default_model_params(
+        self,
+        model_type: str,
+        x: np.ndarray,
+        y: Optional[np.ndarray],
+        n_components: Optional[int],
+        random_state: int,
+        provided: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        params = dict(provided or {})
+        n_samples, n_features = x.shape
+        class_count = len(np.unique(np.asarray(y, dtype=str))) if y is not None else 0
+        imbalance = False
+        if y is not None and class_count >= 2:
+            _, counts = np.unique(np.asarray(y, dtype=str), return_counts=True)
+            imbalance = bool(np.min(counts) / np.max(counts) < 0.3)
+
+        if model_type == "pca":
+            params.setdefault("n_components", min(2, n_samples, n_features))
+        elif model_type == "plsda":
+            params.setdefault("n_components", min(2, max(1, class_count), max(1, n_samples - 1), n_features))
+        elif model_type == "pls":
+            params.setdefault("n_components", min(5, max(1, n_samples - 1), n_features))
+        elif model_type == "svm":
+            params.setdefault("kernel", "rbf")
+            params.setdefault("C", 1.0)
+            params.setdefault("gamma", "scale")
+            params.setdefault("class_weight", "balanced" if imbalance else None)
+        elif model_type == "random_forest":
+            params.setdefault("n_estimators", 200)
+            params.setdefault("class_weight", "balanced" if imbalance else None)
+        elif model_type == "decision_tree":
+            params.setdefault("max_depth", None)
+            params.setdefault("class_weight", "balanced" if imbalance else None)
+        elif model_type in {"kmeans", "hca"}:
+            params.setdefault("n_clusters", class_count if class_count >= 2 else 2)
+            if model_type == "hca":
+                params.setdefault("linkage", "ward")
+        elif model_type == "svr":
+            params.setdefault("kernel", "rbf")
+            params.setdefault("C", 1.0)
+            params.setdefault("epsilon", 0.1)
+            params.setdefault("gamma", "scale")
+        params.setdefault("random_state", int(random_state))
+        if n_components is not None:
+            params["n_components"] = int(n_components)
+        return params
+
+    def _validate_method_inputs(self, model_type: str, x: np.ndarray, y: Optional[np.ndarray]) -> None:
+        if x.ndim != 2 or x.shape[0] < 1 or x.shape[1] < 2:
+            raise ValueError("X должен быть матрицей samples x spectral_features минимум с двумя признаками.")
+        if not np.all(np.isfinite(x)):
+            raise ValueError("Нельзя обучить модель: X содержит NaN или бесконечные значения.")
+        normalized = self._normalize_model_type(model_type)
+        if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
+            if y is None:
+                raise ValueError("Для выбранного метода требуется target, но он не найден.")
+            labels = np.asarray(y, dtype=str)
+            if len(np.unique(labels)) < 2:
+                raise ValueError("Для классификации target должен содержать минимум два класса.")
+        if normalized in {"pls", "svr"}:
+            if y is None:
+                raise ValueError("Для регрессии требуется target, но он не найден.")
+            try:
+                np.asarray(y, dtype=float)
+            except ValueError as exc:
+                raise ValueError("Для регрессии target должен быть числовым.") from exc
+        if normalized not in {"pca", "plsda", "pls", "svm", "random_forest", "decision_tree", "kmeans", "hca", "svr", "mcr_als"}:
+            raise ValueError(f"Метод {model_type} не поддерживается.")
+
+    def _extract_metrics(self, model_type: str, result: Dict[str, Any], validation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized = self._normalize_model_type(model_type)
+        if isinstance(validation, dict) and validation.get("status") == "ok" and isinstance(validation.get("metrics"), dict):
+            return validation["metrics"]
+        if normalized == "pca":
+            ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
+            return {"explained_variance_ratio": ratios, "explained_variance_total": float(sum(ratios))}
+        if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
+            return {key: result.get(key) for key in ["accuracy", "precision_macro", "recall_macro", "f1_macro", "confusion_matrix"] if key in result}
+        if normalized in {"pls", "svr"}:
+            return {key: result.get(key) for key in ["r2", "mae", "rmse"] if key in result}
+        if normalized in {"kmeans", "hca"}:
+            return {key: result.get(key) for key in ["n_clusters", "inertia", "adjusted_rand_score", "normalized_mutual_info_score"] if key in result}
+        return {}
 
     def _run_validation(
         self,
@@ -95,6 +290,7 @@ class AnalysisService:
         x: np.ndarray,
         y: Optional[np.ndarray],
         n_components: Optional[int],
+        model_params: Optional[Dict[str, Any]],
         do_validation: bool,
         test_size: float,
         random_state: int,
@@ -102,10 +298,7 @@ class AnalysisService:
         if not do_validation:
             return {"status": "skipped", "reason": "Validation disabled by user"}
 
-        if model_type not in {"pls", "plsda", "mcr_als", "pca"}:
-            return {"status": "skipped", "reason": "Unsupported model type for validation"}
-
-        if model_type in {"pca", "mcr_als"}:
+        if model_type in {"pca", "mcr_als", "kmeans", "hca"}:
             return {
                 "status": "skipped",
                 "reason": f"{model_type.upper()} does not use supervised holdout metrics",
@@ -139,7 +332,7 @@ class AnalysisService:
         stratify = None
         warnings = []
 
-        if model_type == "plsda":
+        if model_type in {"plsda", "svm", "random_forest", "decision_tree"}:
             y_labels = np.asarray(y, dtype=str)
             unique, counts = np.unique(y_labels, return_counts=True)
             if len(unique) < 2:
@@ -163,10 +356,10 @@ class AnalysisService:
             stratify=stratify,
         )
 
-        eval_model = create_model(model_type=model_type, n_components=n_components)
+        eval_model = create_model(model_type=model_type, n_components=n_components, model_params=model_params)
         eval_model.fit(x_train, y_train)
 
-        if model_type == "pls":
+        if model_type in {"pls", "svr"}:
             y_true = np.asarray(y_test, dtype=float)
             y_pred = np.asarray(eval_model.predict(x_test), dtype=float)
             validation_metrics = {
@@ -179,15 +372,18 @@ class AnalysisService:
                 x=x,
                 y=y,
                 n_components=n_components,
+                model_params=model_params,
                 random_state=random_state,
             )
-            permutation = self._permutation_test(
-                model_type=model_type,
-                x=x,
-                y=y,
-                n_components=n_components,
-                random_state=random_state,
-            )
+            permutation = {"status": "skipped", "reason": "Permutation test is enabled only for PLS/PLS-DA in this lightweight module"}
+            if model_type == "pls":
+                permutation = self._permutation_test(
+                    model_type=model_type,
+                    x=x,
+                    y=y,
+                    n_components=n_components,
+                    random_state=random_state,
+                )
             bootstrap_ci = self._bootstrap_ci_regression(y_true=y_true, y_pred=y_pred, random_state=random_state)
             return {
                 "status": "ok",
@@ -223,15 +419,18 @@ class AnalysisService:
             x=x,
             y=y,
             n_components=n_components,
+            model_params=model_params,
             random_state=random_state,
         )
-        permutation = self._permutation_test(
-            model_type=model_type,
-            x=x,
-            y=y,
-            n_components=n_components,
-            random_state=random_state,
-        )
+        permutation = {"status": "skipped", "reason": "Permutation test is enabled only for PLS/PLS-DA in this lightweight module"}
+        if model_type == "plsda":
+            permutation = self._permutation_test(
+                model_type=model_type,
+                x=x,
+                y=y,
+                n_components=n_components,
+                random_state=random_state,
+            )
         bootstrap_ci = self._bootstrap_ci_classification(y_true=y_true_cls, y_pred=y_pred_cls, random_state=random_state)
         return {
             "status": "ok",
@@ -260,6 +459,7 @@ class AnalysisService:
         x: np.ndarray,
         y: np.ndarray,
         n_components: Optional[int],
+        model_params: Optional[Dict[str, Any]],
         random_state: int,
     ) -> Dict[str, Any]:
         n_samples = len(x)
@@ -267,7 +467,7 @@ class AnalysisService:
             return {"status": "skipped", "reason": "Too few samples for k-fold"}
 
         metrics_per_fold: List[Dict[str, float]] = []
-        if model_type == "plsda":
+        if model_type in {"plsda", "svm", "random_forest", "decision_tree"}:
             y_cls = np.asarray(y, dtype=str)
             _, counts = np.unique(y_cls, return_counts=True)
             n_splits = min(5, int(np.min(counts)))
@@ -283,13 +483,13 @@ class AnalysisService:
             split_iter = splitter.split(x)
 
         for train_idx, test_idx in split_iter:
-            model = create_model(model_type=model_type, n_components=n_components)
+            model = create_model(model_type=model_type, n_components=n_components, model_params=model_params)
             x_train, x_test = x[train_idx], x[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
             model.fit(x_train, y_train)
             y_pred = model.predict(x_test)
 
-            if model_type == "pls":
+            if model_type in {"pls", "svr"}:
                 y_true = np.asarray(y_test, dtype=float)
                 y_pred_num = np.asarray(y_pred, dtype=float)
                 metrics_per_fold.append(
@@ -334,7 +534,14 @@ class AnalysisService:
             return {"status": "skipped", "reason": "Too few samples for permutation test"}
 
         rng = np.random.default_rng(int(random_state))
-        true_cv = self._kfold_validation(model_type=model_type, x=x, y=y, n_components=n_components, random_state=random_state)
+        true_cv = self._kfold_validation(
+            model_type=model_type,
+            x=x,
+            y=y,
+            n_components=n_components,
+            model_params=None,
+            random_state=random_state,
+        )
         if true_cv.get("status") != "ok":
             return {"status": "skipped", "reason": "k-fold validation unavailable for permutation test"}
 
@@ -354,6 +561,7 @@ class AnalysisService:
                 x=x,
                 y=y_perm,
                 n_components=n_components,
+                model_params=None,
                 random_state=int(rng.integers(1, 1_000_000)),
             )
             if perm_cv.get("status") != "ok":
@@ -456,17 +664,30 @@ class AnalysisService:
                     "Распределение классов: "
                     + ", ".join([f"{cls}={cnt}" for cls, cnt in zip(unique.tolist(), counts.tolist())])
                 )
-        limitations.append("Метрики не являются медицинским диагнозом и требуют экспертной интерпретации.")
+        limitations.append("Метрики являются вычислительной оценкой качества модели и требуют проверки на независимых данных.")
         return limitations
 
     def infer(self, model_type: str, model_id: str, dataset: SpectrumDataset) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
+        expected_features = int(metadata.get("feature_count") or 0)
+        if expected_features and dataset.feature_count != expected_features:
+            raise ValueError(
+                f"Количество признаков во входном файле ({dataset.feature_count}) не совпадает "
+                f"с обученной моделью ({expected_features})."
+            )
         result = model.inference_result(dataset.x)
         plot = self._build_plot(metadata.get("model_type", model_type), result, phase="inference")
+        predictions = self._prediction_rows(result, dataset.sample_names)
         return {
+            "status": "success",
+            "model_id": metadata.get("model_id", model_id),
+            "model_type": metadata.get("model_type", model_type),
             "model_metadata": metadata,
             "result": result,
+            "predictions": predictions,
+            "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
+            "warnings": [],
         }
 
     def infer_many(
@@ -476,6 +697,7 @@ class AnalysisService:
         datasets: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
+        expected_features = int(metadata.get("feature_count") or 0)
         all_results: List[Dict[str, Any]] = []
         all_predicted_classes: List[str] = []
         all_predictions: List[float] = []
@@ -483,6 +705,11 @@ class AnalysisService:
         for item in datasets:
             filename = item["filename"]
             dataset: SpectrumDataset = item["dataset"]
+            if expected_features and dataset.feature_count != expected_features:
+                raise ValueError(
+                    f"Файл {filename}: число признаков ({dataset.feature_count}) не совпадает "
+                    f"с обученной моделью ({expected_features})."
+                )
             result = model.inference_result(dataset.x)
             row = {"filename": filename, "result": result}
             all_results.append(row)
@@ -500,37 +727,147 @@ class AnalysisService:
             aggregate_result["predictions"] = all_predictions
 
         plot = self._build_plot(metadata.get("model_type", model_type), aggregate_result, phase="inference")
+        prediction_rows: List[Dict[str, Any]] = []
+        for item in all_results:
+            filename = item["filename"]
+            result = item["result"]
+            names = result.get("sample_ids") or []
+            rows = self._prediction_rows(result, names)
+            for row in rows:
+                row["source_file"] = filename
+            prediction_rows.extend(rows)
         return {
+            "status": "success",
+            "model_id": metadata.get("model_id", model_id),
+            "model_type": metadata.get("model_type", model_type),
             "model_metadata": metadata,
             "batch_results": all_results,
             "aggregate_result": aggregate_result,
+            "predictions": prediction_rows,
+            "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
+            "warnings": [],
         }
 
+    @staticmethod
+    def _prediction_rows(result: Dict[str, Any], sample_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        values = result.get("predicted_classes")
+        if values is None:
+            values = result.get("predictions")
+        if values is None:
+            values = result.get("scores")
+        if values is None:
+            return []
+        rows = []
+        for idx, value in enumerate(values):
+            predicted = value
+            if isinstance(value, list):
+                predicted = ";".join(str(v) for v in value)
+            rows.append({
+                "sample_id": sample_ids[idx] if sample_ids and idx < len(sample_ids) else f"sample_{idx + 1}",
+                "predicted": predicted,
+                "confidence": None,
+                "probabilities": {},
+            })
+        return rows
+
+    @staticmethod
+    def _training_prediction_rows(result: Dict[str, Any], sample_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if "y_true" not in result or "y_pred" not in result:
+            return []
+        rows: List[Dict[str, Any]] = []
+        y_true = result.get("y_true") or []
+        y_pred = result.get("y_pred") or []
+        for idx, (true_value, pred_value) in enumerate(zip(y_true, y_pred)):
+            try:
+                residual = float(true_value) - float(pred_value)
+            except (TypeError, ValueError):
+                residual = None
+            rows.append(
+                {
+                    "sample_id": sample_ids[idx] if sample_ids and idx < len(sample_ids) else f"sample_{idx + 1}",
+                    "y_true": float(true_value) if isinstance(true_value, (int, float)) or str(true_value).replace(".", "", 1).replace("-", "", 1).isdigit() else true_value,
+                    "y_pred": float(pred_value) if isinstance(pred_value, (int, float)) or str(pred_value).replace(".", "", 1).replace("-", "", 1).isdigit() else pred_value,
+                    "residual": residual,
+                }
+            )
+        return rows
+
+    def _build_plots(self, model_type: str, result: Dict[str, Any], phase: str) -> List[Dict[str, Any]]:
+        primary = self._build_plot(model_type, result, phase)
+        plots = [primary] if primary else []
+        normalized = self._normalize_model_type(model_type)
+        if phase == "training" and normalized in {"pls", "svr"} and "y_true" in result and "y_pred" in result:
+            y_true = np.asarray(result["y_true"], dtype=float)
+            y_pred = np.asarray(result["y_pred"], dtype=float)
+            residuals = y_true - y_pred
+            samples = result.get("sample_ids") or [f"sample_{idx + 1}" for idx in range(len(y_true))]
+            plots.append(
+                {
+                    "data": [
+                        {
+                            "type": "scatter",
+                            "mode": "markers",
+                            "x": y_pred.tolist(),
+                            "y": residuals.tolist(),
+                            "text": samples,
+                            "hovertemplate": "sample_id: %{text}<br>y_pred: %{x:.4g}<br>residual: %{y:.4g}<extra></extra>",
+                        },
+                        {"type": "scatter", "mode": "lines", "x": [float(np.min(y_pred)), float(np.max(y_pred))], "y": [0, 0], "name": "0", "line": {"dash": "dash"}},
+                    ],
+                    "layout": {"title": "Residual plot", "xaxis": {"title": "Predicted y"}, "yaxis": {"title": "Residual"}, "template": "plotly_white"},
+                }
+            )
+            plots.append(
+                {
+                    "data": [
+                        {"type": "scatter", "mode": "lines+markers", "x": list(range(1, len(y_pred) + 1)), "y": y_pred.tolist(), "name": "y_pred"},
+                        {"type": "scatter", "mode": "markers", "x": list(range(1, len(y_true) + 1)), "y": y_true.tolist(), "name": "y_true"},
+                    ],
+                    "layout": {"title": "Predicted values by sample", "xaxis": {"title": "Sample index"}, "yaxis": {"title": "Target"}, "template": "plotly_white"},
+                }
+            )
+            scores = np.asarray(result.get("x_scores", []), dtype=float)
+            if normalized == "pls" and scores.ndim == 2 and scores.shape[0] == len(y_true) and scores.shape[1] >= 1:
+                plots.append(self._scatter_scores_plot(scores, y_true.tolist(), "PLS scores", "LV1", "LV2", samples))
+        return plots
+
     def _build_plot(self, model_type: str, result: Dict[str, Any], phase: str) -> Dict[str, Any]:
-        normalized = model_type.lower()
+        normalized = self._normalize_model_type(model_type)
 
         if normalized == "pca":
             scores = np.asarray(result.get("scores", []), dtype=float)
             if scores.size == 0:
                 return {}
-            return pca_plot(scores, "PCA: распределение в пространстве компонент")
+            ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
+            x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
+            y_title = f"PC2 ({ratios[1] * 100:.1f}% дисперсии)" if len(ratios) > 1 else "PC2"
+            return self._scatter_scores_plot(scores, result.get("target"), "PCA: PC1 vs PC2", x_title, y_title, result.get("sample_ids"))
 
-        if normalized == "pls":
+        if normalized in {"pls", "svr"}:
             if phase == "training" and "y_true" in result and "y_pred" in result:
                 y_true = np.asarray(result["y_true"], dtype=float)
                 y_pred = np.asarray(result["y_pred"], dtype=float)
-                return pls_regression_plot(y_true, y_pred, "PLS: предсказание vs истина")
+                title = "PLS Regression: предсказание vs истина" if normalized == "pls" else "SVR: предсказание vs истина"
+                return pls_regression_plot(y_true, y_pred, title)
             if phase == "inference" and "predictions" in result:
                 preds = [float(v) for v in result["predictions"]]
-                return residual_plot(preds, "PLS: значения предсказаний")
+                return residual_plot(preds, f"{normalized.upper()}: значения предсказаний")
             return {}
 
-        if normalized == "plsda":
+        if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
             labels = result.get("y_pred") if phase == "training" else result.get("predicted_classes")
             if not labels:
                 return {}
-            return class_count_plot(labels, "PLS-DA: распределение предсказанных классов")
+            if phase == "training" and result.get("confusion_matrix"):
+                return self._confusion_matrix_plot(result.get("confusion_matrix"), result.get("classes") or [], f"{normalized}: confusion matrix")
+            return class_count_plot(labels, f"{normalized}: распределение предсказанных классов")
+
+        if normalized in {"kmeans", "hca"}:
+            labels = result.get("cluster_labels")
+            if not labels:
+                return {}
+            return class_count_plot([str(v) for v in labels], f"{normalized}: распределение кластеров")
 
         if normalized == "mcr_als":
             residuals = result.get("mean_absolute_residual")
@@ -539,3 +876,64 @@ class AnalysisService:
             return {}
 
         return {}
+
+    def _scatter_scores_plot(
+        self,
+        scores: np.ndarray,
+        labels: Optional[List[Any]],
+        title: str,
+        x_title: str,
+        y_title: str,
+        sample_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        x = scores[:, 0].tolist() if scores.shape[1] >= 1 else [0.0] * scores.shape[0]
+        y = scores[:, 1].tolist() if scores.shape[1] >= 2 else [0.0] * scores.shape[0]
+        labels_list = [str(v) for v in labels] if labels and len(labels) == scores.shape[0] else ["sample"] * scores.shape[0]
+        samples = sample_ids if sample_ids and len(sample_ids) == scores.shape[0] else [f"sample_{i + 1}" for i in range(scores.shape[0])]
+        traces: List[Dict[str, Any]] = []
+        for label in sorted(set(labels_list)):
+            idx = [i for i, value in enumerate(labels_list) if value == label]
+            traces.append(
+                {
+                    "type": "scatter",
+                    "mode": "markers",
+                    "name": label,
+                    "x": [x[i] for i in idx],
+                    "y": [y[i] for i in idx],
+                    "marker": {"size": 10, "opacity": 0.85},
+                    "text": [
+                        f"sample_id: {samples[i]}<br>target: {labels_list[i]}<br>PC1: {x[i]:.4g}<br>PC2: {y[i]:.4g}"
+                        for i in idx
+                    ],
+                    "hovertemplate": "%{text}<extra></extra>",
+                }
+            )
+        return {
+            "data": traces,
+            "layout": {
+                "title": title,
+                "xaxis": {"title": x_title},
+                "yaxis": {"title": y_title},
+                "template": "plotly_white",
+            },
+        }
+
+    def _confusion_matrix_plot(self, matrix: List[List[int]], classes: List[str], title: str) -> Dict[str, Any]:
+        return {
+            "data": [
+                {
+                    "type": "heatmap",
+                    "z": matrix,
+                    "x": classes,
+                    "y": classes,
+                    "colorscale": "Blues",
+                    "showscale": True,
+                }
+            ],
+            "layout": {
+                "title": title,
+                "xaxis": {"title": "Предсказанный класс"},
+                "yaxis": {"title": "Истинный класс"},
+                "template": "plotly_white",
+            },
+        }

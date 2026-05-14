@@ -33,9 +33,20 @@ def pca_plot(scores: np.ndarray, title: str) -> Dict[str, Any]:
 
 
 def pls_regression_plot(y_true: np.ndarray, y_pred: np.ndarray, title: str) -> Dict[str, Any]:
+    lo = float(min(np.min(y_true), np.min(y_pred))) if len(y_true) else 0.0
+    hi = float(max(np.max(y_true), np.max(y_pred))) if len(y_true) else 1.0
     return {
         "data": [
-            _scatter(y_true.tolist(), y_pred.tolist(), [f"sample_{i + 1}" for i in range(len(y_true))], "Prediction")
+            _scatter(y_true.tolist(), y_pred.tolist(), [f"sample_{i + 1}" for i in range(len(y_true))], "Prediction"),
+            {
+                "type": "scatter",
+                "mode": "lines",
+                "x": [lo, hi],
+                "y": [lo, hi],
+                "name": "y=x",
+                "line": {"dash": "dash", "color": "#64748b"},
+                "hoverinfo": "skip",
+            },
         ],
         "layout": {
             "title": title,

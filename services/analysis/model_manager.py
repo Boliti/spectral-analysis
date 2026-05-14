@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
+import zipfile
 
 
 class ModelManager:
@@ -16,9 +17,17 @@ class ModelManager:
         self.root_dir.mkdir(parents=True, exist_ok=True)
 
     def _model_dir(self, model_type: str) -> Path:
-        target = self.root_dir / model_type.lower()
+        safe_model_type = self._safe_name(model_type, "model_type")
+        target = self.root_dir / safe_model_type.lower()
         target.mkdir(parents=True, exist_ok=True)
         return target
+
+    @staticmethod
+    def _safe_name(value: str, field_name: str) -> str:
+        normalized = (value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", normalized):
+            raise ValueError(f"Некорректный {field_name}: разрешены только буквы, цифры, '_' и '-'")
+        return normalized
 
     def _next_model_id(self, model_type: str) -> str:
         model_dir = self._model_dir(model_type)
@@ -32,7 +41,8 @@ class ModelManager:
 
     def _paths(self, model_type: str, model_id: str) -> Tuple[Path, Path]:
         model_dir = self._model_dir(model_type)
-        return model_dir / f"{model_id}.joblib", model_dir / f"{model_id}_meta.json"
+        safe_model_id = self._safe_name(model_id, "model_id")
+        return model_dir / f"{safe_model_id}.joblib", model_dir / f"{safe_model_id}_meta.json"
 
     def save(self, model_type: str, model_obj: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
         model_id = self._next_model_id(model_type)
@@ -44,6 +54,9 @@ class ModelManager:
             "created_at": datetime.now(timezone.utc).isoformat(),
             **metadata,
         }
+        if not payload.get("model_name"):
+            payload["model_name"] = f"{model_type}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        payload.setdefault("display_name", payload["model_name"])
 
         joblib.dump(model_obj, model_path)
         meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -75,6 +88,40 @@ class ModelManager:
         if not meta_path.exists():
             raise FileNotFoundError("Метаданные модели не найдены")
         return json.loads(meta_path.read_text(encoding="utf-8"))
+
+    def model_bytes(self, model_type: str, model_id: str) -> Tuple[bytes, str]:
+        model_path, _ = self._paths(model_type, model_id)
+        if not model_path.exists():
+            raise FileNotFoundError("Модель не найдена")
+        return model_path.read_bytes(), model_path.name
+
+    def metadata_bytes(self, model_type: str, model_id: str) -> Tuple[bytes, str]:
+        _, meta_path = self._paths(model_type, model_id)
+        if not meta_path.exists():
+            raise FileNotFoundError("Метаданные модели не найдены")
+        return meta_path.read_bytes(), meta_path.name
+
+    def export_zip(self, model_type: str, model_id: str) -> bytes:
+        model_path, meta_path = self._paths(model_type, model_id)
+        if not model_path.exists() or not meta_path.exists():
+            raise FileNotFoundError("Модель не найдена")
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        preprocessing = metadata.get("preprocessing_config") or metadata.get("preprocessing") or {}
+        readme = (
+            f"Saved spectral analysis model\n"
+            f"model_id: {metadata.get('model_id')}\n"
+            f"model_type: {metadata.get('model_type')}\n"
+            f"task_type: {metadata.get('task_type')}\n"
+            f"target: {metadata.get('target_name') or 'none'}\n"
+        )
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(model_path, "model.joblib")
+            archive.write(meta_path, "model_metadata.json")
+            archive.writestr("preprocessing_config.json", json.dumps(preprocessing, ensure_ascii=False, indent=2))
+            archive.writestr("README.txt", readme)
+        buffer.seek(0)
+        return buffer.read()
 
     def list_models(self, model_type: Optional[str] = None) -> List[Dict[str, Any]]:
         types = [model_type.lower()] if model_type else [p.name for p in self.root_dir.iterdir() if p.is_dir()]
