@@ -1,10 +1,14 @@
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
+*.pyd
 *$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
@@ -19,16 +23,40 @@ ENV/
 !.env.example
 
 # Local databases and runtime data
+users.db
 *.db
 *.sqlite
 *.sqlite3
-uploads/
-saved_models/
+*.mb
+*.mdb
+*.accdb
+uploads/*
+!uploads/.gitkeep
+datasets/*
+!datasets/.gitkeep
+saved_models/*
+!saved_models/.gitkeep
+saved_runs/*
+!saved_runs/.gitkeep
+user_data/*
+!user_data/.gitkeep
+results/experiments/*
+!results/experiments/.gitkeep
+results/configs/*
+!results/configs/.gitkeep
+results/reports/*
+!results/reports/.gitkeep
+*.joblib
+*.pkl
+*.pickle
 
 # Logs and temporary files
+logs/
 *.log
 tmp/
 temp/
+*.tmp
+*.bak
 
 # Editor and local tool state
 .vscode/
