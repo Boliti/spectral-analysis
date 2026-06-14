@@ -106,6 +106,7 @@
 
         <section class="card">
             <h3>Загрузка и предпросмотр</h3>
+            <p class="block-description">Импортируйте Excel, ZIP/ASC или TXT/CSV, затем проверьте ось, target и первые графики.</p>
             <div class="line-controls wrap">
                 <input id="dataset-files" type="file" accept=".xlsx,.xls,.csv,.txt,.esp,.zip" multiple>
                 <button id="dataset-preview-btn" class="btn btn-primary">Предпросмотр</button>
@@ -115,6 +116,7 @@
 
         <section class="card">
             <h3>Структура датасета</h3>
+            <p class="block-description">Выберите формат данных и target-кандидат. Технические настройки спрятаны ниже, чтобы не перегружать основной сценарий.</p>
             <div class="layout-cards" id="dataset-layout-cards">
                 <button type="button" class="layout-card" data-layout="excel_rows">
                     <strong>Спектры по строкам</strong>
@@ -483,6 +485,7 @@
         </section>
         <section class="card" id="saved-datasets-card">
             <h3>Сохранённые датасеты</h3>
+            <p class="block-description">Сохраняйте raw и processed версии, чтобы не загружать один и тот же датасет перед каждым запуском.</p>
             <div class="line-controls wrap">
                 <input id="save-dataset-name" class="input-field" type="text" placeholder="Название датасета">
                 <select id="save-dataset-version" class="input-field">
@@ -501,6 +504,7 @@
 
         <section class="card">
             <h3>Источник данных</h3>
+            <p class="block-description">Здесь показан активный датасет, который будет использован для обучения модели.</p>
             <div id="active-dataset-badge" class="loaded-badge loaded-badge--empty">Импортированный датасет не выбран. Можно загрузить файл вручную.</div>
             <div class="line-controls wrap">
                 <button id="choose-other-dataset-btn" class="btn btn-secondary" type="button">Выбрать другой датасет</button>
@@ -516,6 +520,7 @@
 
         <section class="card">
             <h3>Настройки анализа</h3>
+            <p class="block-description">Мастер показывает только подходящие задачи и методы для выбранного target.</p>
             <div class="line-controls wrap analysis-mode-controls">
                 <label>Режим настройки
                     <select id="model-config-mode" class="input-field">
@@ -665,6 +670,7 @@
 
         <section class="card" id="infer-section">
             <h3>Сохранённые модели</h3>
+            <p class="block-description">Загрузите модель перед применением к новым спектрам. Активная модель подсвечивается в списке.</p>
             <div class="line-controls wrap">
                 <button id="refresh-models-btn" class="btn">Обновить список</button>
             </div>
@@ -699,6 +705,7 @@
 
         <section class="card" id="model-apply-card">
             <h3>Применение модели к новым данным</h3>
+            <p class="block-description">Выберите один или несколько новых спектров. Длинный список файлов будет свернут.</p>
             <div class="line-controls wrap">
                 <input id="infer-file" type="file" accept=".csv,.txt,.esp,.xlsx,.xls" multiple>
                 <button id="infer-btn" class="btn btn-primary">Применить модель к выбранным файлам</button>
@@ -708,6 +715,7 @@
 
         <section class="card" id="results-section" style="display:none;">
             <h3>Результаты</h3>
+            <p class="block-description">Сводка, метрики, графики, экспорт и читаемый JSON ответа.</p>
             <div class="result-tabs" role="tablist" aria-label="Разделы результата">
                 <button type="button" class="result-tab result-tab--active" data-result-tab="summary">Сводка</button>
                 <button type="button" class="result-tab" data-result-tab="metrics">Метрики</button>
@@ -739,6 +747,7 @@
 
         <section class="card" id="runs-section">
             <h3>История экспериментов</h3>
+            <p class="block-description">Компактный список запусков: дата, тип, статус, главный результат и быстрые действия.</p>
             <div class="line-controls wrap">
                 <button id="refresh-runs-btn" class="btn" type="button">Обновить историю</button>
             </div>

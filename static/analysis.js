@@ -807,7 +807,7 @@ function setLoadedModelBadge() {
     }
     loadedModelBadge.classList.remove("loaded-badge--empty");
     loadedModelBadge.classList.add("loaded-badge--ok");
-    loadedModelBadge.textContent = `Загружена модель: ${selectedModel.modelId} [${selectedModel.modelType}]`;
+    loadedModelBadge.innerHTML = `Активная модель: <strong>${escapeHtml(selectedModel.modelId)}</strong> <span class="ui-badge ui-badge--info">${escapeHtml(selectedModel.modelType)}</span>`;
 }
 
 function updateInferFilesHint() {
@@ -818,6 +818,7 @@ function updateInferFilesHint() {
         const allNames = files.map((f) => f.name);
         inferFilesHint.innerHTML = `
             <div>Выбрано файлов: ${files.length}</div>
+            <div class="muted">Первые 5:</div>
             <div class="selected-file-list">${firstNames.map(escapeHtml).join("<br>")}</div>
             ${files.length > 5 ? `
                 <button type="button" class="btn btn-ghost btn-mini" data-show-selected-files>Показать все</button>
@@ -1066,9 +1067,9 @@ function formatInferenceConfidence(row = {}) {
     if (typeof value === "number") return `p=${value.toFixed(4)}`;
     if (value !== undefined && value !== null && String(value).trim()) return String(value);
     const score = row.decision_score ?? row.score;
-    if (typeof score === "number") return `score=${score.toFixed(4)}; вероятность недоступна`;
-    if (score !== undefined && score !== null && String(score).trim()) return `score=${score}; вероятность недоступна`;
-    return "вероятность недоступна";
+    if (typeof score === "number") return `score=${score.toFixed(4)}; вероятность недоступна для данной модели`;
+    if (score !== undefined && score !== null && String(score).trim()) return `score=${score}; вероятность недоступна для данной модели`;
+    return "вероятность недоступна для данной модели";
 }
 
 function inferenceReportText(payload = {}) {
@@ -1100,28 +1101,54 @@ function renderPredictionsTable(payload) {
         comparisonResult.innerHTML = "<p class=\"muted\">Модель выполнена, но явные predictions в ответе не найдены. Подробности доступны в JSON.</p>";
         return;
     }
+    const counts = {};
+    lastPredictionRows.forEach((row) => {
+        counts[row.predicted] = (counts[row.predicted] || 0) + 1;
+    });
+    const meta = payload.model_metadata || {};
+    const distributionText = Object.entries(counts).map(([cls, count]) => `${cls}: ${count}`).join(", ") || "н/д";
+    const modelName = meta.model_name || meta.model_id || payload.model_id || selectedModel?.modelId || "н/д";
+    const modelType = meta.model_type || payload.model_type || selectedModel?.modelType || "н/д";
+    const allOneClassWarning = Object.keys(counts).length === 1 && lastPredictionRows.length > 1
+        ? `<div class="ui-alert ui-alert--warning">Все файлы отнесены к одному классу. Проверьте ось спектра, предобработку и применимость модели.</div>`
+        : "";
     const rowsHtml = lastPredictionRows.map((row) => `
         <tr>
-            <td>${escapeHtml(row.source_file || row.sample_id)}</td>
+            <td title="${escapeHtml(row.source_file || row.sample_id)}">${escapeHtml(shortText(row.source_file || row.sample_id, 58))}</td>
             <td><strong>${escapeHtml(row.predicted)}</strong></td>
             <td>${escapeHtml(row.confidence)}</td>
             <td>${escapeHtml(row.warnings || "")}</td>
         </tr>
     `).join("");
     comparisonResult.innerHTML = `
+        <div class="inference-summary-grid">
+            <div class="summary-tile summary-tile--dataset">
+                <div class="summary-label">Модель</div>
+                <div class="summary-value" title="${escapeHtml(modelName)}">${escapeHtml(shortText(modelName, 44))}</div>
+            </div>
+            <div class="summary-tile">
+                <div class="summary-label">Тип модели</div>
+                <div class="summary-value">${escapeHtml(modelType)}</div>
+            </div>
+            <div class="summary-tile summary-tile--success">
+                <div class="summary-label">Обработано файлов</div>
+                <div class="summary-value">${lastPredictionRows.length}</div>
+            </div>
+            <div class="summary-tile">
+                <div class="summary-label">Распределение классов</div>
+                <div class="summary-value summary-value--compact" title="${escapeHtml(distributionText)}">${escapeHtml(shortText(distributionText, 64))}</div>
+            </div>
+        </div>
+        ${allOneClassWarning}
         <div class="line-controls wrap">
             <button type="button" class="btn" data-download-predictions-csv>Скачать CSV результатов</button>
             <button type="button" class="btn" data-download-result-json>Скачать JSON результата</button>
         </div>
-        <table class="comparison-table">
-            <thead><tr><th>Файл</th><th>Предсказанный класс / значение</th><th>Достоверность / вероятность</th></tr></thead>
+        <table class="comparison-table compact-table">
+            <thead><tr><th>Файл</th><th>Предсказанный класс / значение</th><th>Вероятность / score</th><th>Предупреждения</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
         </table>
     `;
-    const counts = {};
-    lastPredictionRows.forEach((row) => {
-        counts[row.predicted] = (counts[row.predicted] || 0) + 1;
-    });
     const labels = Object.keys(counts);
     if (labels.length && labels.length <= 30) {
         newPlot("plot", [{ type: "bar", x: labels, y: labels.map((label) => counts[label]) }], {
@@ -1257,7 +1284,7 @@ function appendRegressionPredictionsTable(predictions) {
             <button type="button" class="btn" data-download-predictions-csv>Скачать predictions CSV</button>
             <button type="button" class="btn" data-download-result-json>Скачать result JSON</button>
         </div>
-        <table class="comparison-table">
+        <table class="comparison-table compact-table">
             <thead><tr><th>sample_id</th><th>y_true</th><th>y_pred</th><th>residual</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
         </table>
@@ -1362,7 +1389,7 @@ function renderMetricsTable(rows, bestMethod = "") {
         return `<tr class="${cls}"><td><strong>${escapeHtml(row.method || row.model_type || "model")}</strong></td>${cells}<td>${escapeHtml(row.status || "success")}</td></tr>`;
     }).join("");
     comparisonResult.innerHTML = `
-        <table class="comparison-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+        <table class="comparison-table compact-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
         <div class="metric-help">${metricHelpText(activeKeys)}</div>
     `;
 }
@@ -2318,15 +2345,15 @@ function renderDatasetReady(summary) {
         ? `numeric, ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}, уровней: ${summary.target_unique_count ?? "н/д"}`
         : classes;
     const tiles = [
-        ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д"],
-        ["Спектров", summary.n_samples],
-        ["Признаков", summary.n_features],
-        ["Target", summary.target_name || "нет"],
-        [summary.target_type === "numeric" ? "Тип target" : "Классы", targetInfo],
-        ["Задача", summary.task_recommendation || "н/д"],
-        ["Диапазон", `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`],
-        ["NaN/Inf", summary.nan_count ?? 0],
-        ["Статус", summary.technical_status || "ok"],
+        ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д", "dataset"],
+        ["Спектров", summary.n_samples, "count"],
+        ["Признаков", summary.n_features, "count"],
+        ["Target", summary.target_name || "нет", summary.target_name ? "target" : "warning"],
+        [summary.target_type === "numeric" ? "Тип target" : "Классы", targetInfo, "classes"],
+        ["Задача", summary.task_recommendation || "н/д", "task"],
+        ["Диапазон", `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`, "range"],
+        ["NaN/Inf", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
+        ["Статус", summary.technical_status || "ok", summary.technical_status === "ok" || !summary.technical_status ? "success" : "warning"],
     ];
     const technical = [
         `dataset_id: ${summary.dataset_id || importedDatasetId || "н/д"}`,
@@ -2337,10 +2364,10 @@ function renderDatasetReady(summary) {
     ].filter(Boolean).join("\n");
     datasetReadySummary.innerHTML = `
         <div class="dataset-summary-grid">
-            ${tiles.map(([label, value]) => `
-                <div class="summary-tile">
+            ${tiles.map(([label, value, kind]) => `
+                <div class="summary-tile summary-tile--${escapeHtml(kind || "default")}">
                     <div class="summary-label">${escapeHtml(label)}</div>
-                    <div class="summary-value">${escapeHtml(value)}</div>
+                    <div class="summary-value" title="${escapeHtml(value)}">${escapeHtml(shortText(value, 54))}</div>
                 </div>
             `).join("")}
         </div>
@@ -2698,13 +2725,35 @@ function shortText(value, max = 56) {
     return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
 }
 
+function versionBadge(version = "raw") {
+    const safeVersion = String(version || "raw");
+    const kind = safeVersion === "processed" ? "processed" : "raw";
+    return `<span class="ui-badge ui-badge--${kind}">${escapeHtml(safeVersion)}</span>`;
+}
+
+function statusBadge(status = "success") {
+    const safeStatus = String(status || "success");
+    const normalized = /fail|error|ошиб/i.test(safeStatus)
+        ? "error"
+        : /warn|пред/i.test(safeStatus)
+            ? "warning"
+            : /run|process|pending|вып/i.test(safeStatus)
+                ? "info"
+                : "success";
+    return `<span class="ui-badge ui-badge--${normalized}">${escapeHtml(safeStatus)}</span>`;
+}
+
+function metricBadge(text) {
+    return text && text !== "н/д" ? `<span class="metric-badge">${escapeHtml(text)}</span>` : `<span class="muted">н/д</span>`;
+}
+
 function sourceFilesDetails(files = []) {
     if (!Array.isArray(files) || !files.length) return "";
     const first = files.slice(0, 5);
     return `
         <details class="source-files-details">
             <summary>Показать исходные файлы</summary>
-            <div>Файлов: ${files.length}</div>
+            <div class="source-files-count">Файлов: ${files.length}</div>
             <ul>
                 ${first.map((name) => `<li title="${escapeHtml(name)}">${escapeHtml(shortText(name, 72))}</li>`).join("")}
             </ul>
@@ -2913,20 +2962,20 @@ async function refreshSavedDatasets() {
             return `
             <tr data-saved-dataset-id="${escapeHtml(item.dataset_id)}">
                 <td class="dataset-name-cell" title="${escapeHtml(item.dataset_name || item.dataset_id)}"><strong>${escapeHtml(shortText(item.dataset_name || item.dataset_id, 52))}</strong><br><span class="muted">${escapeHtml(shortText(item.dataset_id, 16))}</span></td>
-                <td>${escapeHtml(item.version || "raw")}</td>
+                <td>${versionBadge(item.version || "raw")}</td>
                 <td>${escapeHtml(item.n_samples ?? "н/д")}</td>
                 <td>${escapeHtml(item.n_features ?? "н/д")}</td>
                 <td>${escapeHtml(item.target_column || "нет")}<br><span class="muted">${escapeHtml(item.target_type || "")}</span></td>
-                <td>${escapeHtml(classes)}</td>
-                <td>${escapeHtml(preprocessingText)}</td>
+                <td title="${escapeHtml(classes)}">${escapeHtml(shortText(classes, 44))}</td>
+                <td title="${escapeHtml(preprocessingText)}">${escapeHtml(shortText(preprocessingText, 36))}</td>
                 <td>${escapeHtml(formatDateTime(item.created_at))}</td>
                 <td class="actions">
-                    <button type="button" class="btn btn-secondary" data-use-saved-dataset="${escapeHtml(item.dataset_id)}">Использовать</button>
-                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="csv">CSV</button>
-                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="xlsx">XLSX</button>
-                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="json">JSON</button>
-                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="zip">ZIP</button>
-                    <button type="button" class="btn btn-danger" data-delete-saved-dataset="${escapeHtml(item.dataset_id)}">Удалить</button>
+                    <button type="button" class="btn btn-secondary btn-mini" data-use-saved-dataset="${escapeHtml(item.dataset_id)}">Использовать</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="csv">CSV</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="xlsx">XLSX</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="json">JSON</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="zip">ZIP</button>
+                    <button type="button" class="btn btn-danger btn-mini" data-delete-saved-dataset="${escapeHtml(item.dataset_id)}">Удалить</button>
                 </td>
             </tr>
         `;
@@ -3582,7 +3631,7 @@ function updateCompactPreprocessingStatus(config = buildPreprocessingConfig()) {
         : [methodLabel(config.baseline?.method), methodLabel(config.smoothing?.method), methodLabel(config.normalization?.method)]
             .filter((item) => item && item !== "выключено")
             .join(" + ") || "не применяется";
-    rowTitle.textContent = `Предобработка: ${summary}`;
+    rowTitle.textContent = `Активная обработка: ${summary}`;
 }
 
 async function previewPreprocessing() {
@@ -3853,21 +3902,22 @@ async function refreshModels() {
                             ? `inertia=${Number(metrics.inertia).toFixed(3)}`
                             : "";
         const key = `${model.model_type}:${model.model_id}`;
+        const isActive = selectedModel?.modelType === model.model_type && selectedModel?.modelId === model.model_id;
         return `
-            <tr data-model-key="${escapeHtml(key)}">
+            <tr data-model-key="${escapeHtml(key)}" class="${isActive ? "is-selected" : ""}">
                 <td><strong>${escapeHtml(model.model_name || model.model_id)}</strong><br><span class="muted">${escapeHtml(model.model_id || "")}</span></td>
                 <td>${escapeHtml(model.model_type || "н/д")}</td>
                 <td>${escapeHtml(model.task_type || "analysis")}</td>
                 <td>${escapeHtml(model.target_name || "нет")}</td>
-                <td>${escapeHtml(metricText || "н/д")}</td>
+                <td>${metricBadge(metricText)}</td>
                 <td class="dataset-name-cell" title="${escapeHtml(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д")}">${escapeHtml(shortText(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д", 52))}<br><span class="muted">${escapeHtml(shortText(model.dataset_id || "", 8))}</span></td>
-                <td>${escapeHtml(model.dataset_version || "raw")}</td>
+                <td>${versionBadge(model.dataset_version || "raw")}</td>
                 <td>${escapeHtml(formatDateTime(model.created_at))}</td>
                 <td class="actions">
-                    <button type="button" class="btn btn-ghost" data-open-model="${escapeHtml(key)}">Открыть</button>
-                    <button type="button" class="btn btn-secondary" data-load-model="${escapeHtml(key)}">Загрузить</button>
-                    <button type="button" class="btn btn-ghost" data-download-model-zip="${escapeHtml(key)}">Скачать ZIP</button>
-                    <button type="button" class="btn btn-danger" data-delete-model="${escapeHtml(key)}">Удалить</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-open-model="${escapeHtml(key)}">Открыть</button>
+                    <button type="button" class="btn btn-secondary btn-mini" data-load-model="${escapeHtml(key)}">Загрузить</button>
+                    <button type="button" class="btn btn-ghost btn-mini" data-download-model-zip="${escapeHtml(key)}">ZIP</button>
+                    <button type="button" class="btn btn-danger btn-mini" data-delete-model="${escapeHtml(key)}">Удалить</button>
                 </td>
             </tr>
         `;
@@ -3901,25 +3951,27 @@ async function refreshRuns() {
         }
         const rows = runs.map((run) => {
             const metric = run.best_metric || run.metric || run.results?.best_metric || run.best_method || "н/д";
+            const title = run.run_name || run.name || run.run_id;
             return `
                 <tr data-run-id="${escapeHtml(run.run_id)}">
-                    <td>${escapeHtml(formatDateTime(run.created_at))}<br><span class="muted">${escapeHtml(run.run_id)}</span></td>
+                    <td title="${escapeHtml(title)}"><strong>${escapeHtml(shortText(title, 44))}</strong><br><span class="muted">${escapeHtml(shortText(run.run_id, 18))}</span></td>
                     <td>${escapeHtml(run.run_type || "analysis")}</td>
                     <td>${escapeHtml(run.best_method || run.method || "н/д")}</td>
                     <td>${escapeHtml(run.target_name || "нет")}</td>
-                    <td>${escapeHtml(metric)}</td>
-                    <td>${escapeHtml(run.status || "success")}</td>
+                    <td>${metricBadge(String(metric))}</td>
+                    <td>${statusBadge(run.status || "success")}</td>
+                    <td>${escapeHtml(formatDateTime(run.created_at))}</td>
                     <td class="actions">
-                        <button type="button" class="btn btn-ghost" data-open-run="${escapeHtml(run.run_id)}">Открыть</button>
-                        <button type="button" class="btn btn-ghost" data-run-export="${escapeHtml(run.run_id)}">Скачать ZIP</button>
-                        <button type="button" class="btn btn-danger" data-delete-run="${escapeHtml(run.run_id)}">Удалить</button>
+                        <button type="button" class="btn btn-ghost btn-mini" data-open-run="${escapeHtml(run.run_id)}">Открыть</button>
+                        <button type="button" class="btn btn-ghost btn-mini" data-run-export="${escapeHtml(run.run_id)}">ZIP</button>
+                        <button type="button" class="btn btn-danger btn-mini" data-delete-run="${escapeHtml(run.run_id)}">Удалить</button>
                     </td>
                 </tr>
             `;
         }).join("");
         runsList.innerHTML = `
             <table class="compact-table">
-                <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Target</th><th>Метрика</th><th>Датасет</th><th>Версия</th><th>Дата</th><th>Действия</th></tr></thead>
+                <thead><tr><th>Запуск</th><th>Тип</th><th>Метод</th><th>Target</th><th>Результат</th><th>Статус</th><th>Дата</th><th>Действия</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         `;
@@ -4118,12 +4170,16 @@ function renderModelMetadataCard(meta = {}) {
     const preprocessing = meta.preprocessing_config || meta.preprocessing || {};
     const metrics = meta.metrics || {};
     const classes = Array.isArray(meta.classes) ? meta.classes.join(", ") : (meta.classes || "н/д");
+    const metricsHtml = Object.keys(metrics).length
+        ? `<div class="metric-list">${Object.entries(metrics).map(([key, value]) => `
+            <span class="metric-chip"><span>${escapeHtml(key)}</span><strong>${escapeHtml(typeof value === "number" ? value.toFixed(4) : value)}</strong></span>
+        `).join("")}</div>`
+        : "н/д";
     const tiles = [
         ["Тип", meta.model_type || "н/д"],
         ["Задача", meta.task_type || "н/д"],
         ["Target", meta.target_name || "н/д"],
         ["Классы", classes || "н/д"],
-        ["Метрики", Object.keys(metrics).length ? Object.entries(metrics).map(([k, v]) => `${k}: ${typeof v === "number" ? v.toFixed(4) : v}`).join("; ") : "н/д"],
         ["Dataset", meta.dataset_name || meta.dataset_id || "н/д"],
         ["Предобработка", `baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`],
         ["Ожидается признаков", meta.feature_count || meta.n_features || "н/д"],
@@ -4135,9 +4191,13 @@ function renderModelMetadataCard(meta = {}) {
             ${tiles.map(([label, value]) => `
                 <div class="metadata-tile">
                     <div class="metadata-label">${escapeHtml(label)}</div>
-                    <div class="metadata-value">${escapeHtml(value)}</div>
+                    <div class="metadata-value" title="${escapeHtml(value)}">${escapeHtml(shortText(value, 72))}</div>
                 </div>
             `).join("")}
+        </div>
+        <div class="metadata-metrics">
+            <div class="metadata-label">Метрики</div>
+            ${metricsHtml}
         </div>
         <details>
             <summary>Показать технические сведения</summary>

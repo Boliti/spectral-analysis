@@ -114,6 +114,14 @@ body {
     color: var(--muted);
 }
 
+.block-description {
+    max-width: 860px;
+    margin: -4px 0 12px;
+    color: var(--muted);
+    font-size: 0.94rem;
+    line-height: 1.45;
+}
+
 .major-block {
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -121,6 +129,11 @@ body {
     margin-bottom: 16px;
     background: var(--surface-2);
     box-shadow: none;
+}
+
+.major-block > .card,
+.card {
+    scroll-margin-top: 88px;
 }
 
 .major-title {
@@ -686,6 +699,12 @@ button:hover,
     padding: 12px;
     background: var(--surface-2);
     gap: 8px;
+    min-width: 0;
+}
+
+.preprocessing-method-card:has(.pre-status-badge--on) {
+    border-color: var(--success-border);
+    background: color-mix(in srgb, var(--success-bg) 62%, var(--surface));
 }
 
 .pre-status-badge {
@@ -709,8 +728,9 @@ button:hover,
     margin: 8px 0 10px;
     padding: 10px 12px;
     border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
+    border: 1px solid var(--success-border);
+    background: var(--success-bg);
+    color: var(--success-text);
     font-weight: 700;
 }
 
@@ -1035,6 +1055,11 @@ button:hover,
 
 .analysis-run-summary {
     margin: 12px 0;
+    border: 1px solid color-mix(in srgb, var(--primary) 34%, var(--border));
+    border-left: 4px solid var(--primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--primary) 7%, var(--surface));
 }
 
 .analysis-run-summary__main {
@@ -1073,6 +1098,7 @@ button:disabled,
     padding: 8px 10px;
     border-radius: 8px;
     font-weight: 600;
+    line-height: 1.45;
 }
 
 .loaded-badge--ok {
@@ -1089,7 +1115,7 @@ button:disabled,
 
 .models-list {
     max-height: 360px;
-    overflow-y: auto;
+    overflow: auto;
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0;
@@ -1193,7 +1219,7 @@ html[data-theme="dark"] .comparison-best-row {
 .dataset-summary-grid,
 .metadata-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 10px;
     margin-bottom: 12px;
 }
@@ -1204,6 +1230,7 @@ html[data-theme="dark"] .comparison-best-row {
     border-radius: 8px;
     padding: 12px;
     background: var(--surface-2);
+    min-width: 0;
 }
 
 .summary-label,
@@ -1219,7 +1246,29 @@ html[data-theme="dark"] .comparison-best-row {
     margin-top: 4px;
     font-size: 18px;
     font-weight: 800;
-    word-break: break-word;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.summary-value--compact {
+    font-size: 15px;
+}
+
+.summary-tile--dataset,
+.summary-tile--target {
+    border-color: var(--success-border);
+    background: var(--success-bg);
+}
+
+.summary-tile--warning {
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+}
+
+.summary-tile--success {
+    border-color: var(--success-border);
+    background: color-mix(in srgb, var(--success-bg) 70%, var(--surface));
 }
 
 .compact-preprocessing-row {
@@ -1266,6 +1315,7 @@ html[data-theme="dark"] .comparison-best-row {
 .compact-table {
     width: 100%;
     border-collapse: collapse;
+    table-layout: fixed;
 }
 
 .compact-table th,
@@ -1274,6 +1324,8 @@ html[data-theme="dark"] .comparison-best-row {
     border-bottom: 1px solid var(--border);
     text-align: left;
     vertical-align: top;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .compact-table th {
@@ -1291,6 +1343,26 @@ html[data-theme="dark"] .comparison-best-row {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+    min-width: 160px;
+}
+
+.compact-table th:last-child,
+.compact-table td:last-child {
+    width: 210px;
+}
+
+.comparison-table.compact-table th:first-child,
+.comparison-table.compact-table td:first-child {
+    width: 30%;
+}
+
+.compact-table .actions .btn-mini {
+    margin-top: 0;
+}
+
+.compact-table tr.is-selected {
+    outline: 2px solid color-mix(in srgb, var(--primary) 50%, transparent);
+    outline-offset: -2px;
 }
 
 .plot-box {
@@ -1594,6 +1666,104 @@ body {
     margin-top: 8px;
     padding: 4px 8px;
     font-size: 12px;
+}
+
+.ui-badge,
+.metric-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    max-width: 100%;
+    min-height: 24px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.ui-badge--raw,
+.ui-badge--info {
+    color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 38%, var(--border));
+    background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+}
+
+.ui-badge--processed,
+.ui-badge--success,
+.metric-badge {
+    color: var(--success-text);
+    border-color: var(--success-border);
+    background: var(--success-bg);
+}
+
+.ui-badge--warning {
+    color: var(--warning-text);
+    border-color: var(--warning-border);
+    background: var(--warning-bg);
+}
+
+.ui-badge--error {
+    color: var(--danger-text);
+    border-color: var(--danger-border);
+    background: var(--danger-bg);
+}
+
+.ui-alert {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-weight: 650;
+}
+
+.ui-alert--warning {
+    color: var(--warning-text);
+    border: 1px solid var(--warning-border);
+    background: var(--warning-bg);
+}
+
+.inference-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.metadata-metrics {
+    margin: 8px 0 10px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+}
+
+.metric-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.metric-chip {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    max-width: 100%;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 12px;
+}
+
+.metric-chip span {
+    color: var(--muted);
+}
+
+.metric-chip strong {
+    color: var(--text);
 }
 
 .preprocessing-inline-params {
