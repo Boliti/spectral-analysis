@@ -13,6 +13,9 @@ let selectedSavedModel = null;
 let lastDatasetPreviewData = null;
 let lastResultPlots = [];
 let loadingSlowTimer = null;
+let selectedAnalysisTask = null;
+let selectedAnalysisMethod = null;
+let lastAnalysisSelectionKey = null;
 
 const datasetFilesInput = document.getElementById("dataset-files");
 const datasetPreviewBtn = document.getElementById("dataset-preview-btn");
@@ -28,12 +31,17 @@ const datasetIdColumnInput = document.getElementById("dataset-id-column");
 const datasetTargetColumnInput = document.getElementById("dataset-target-column");
 const datasetAxisColumnInput = document.getElementById("dataset-axis-column");
 const datasetTargetSourceInput = document.getElementById("dataset-target-source");
+const datasetTargetRegexInput = document.getElementById("dataset-target-regex");
 const datasetManualTargetInput = document.getElementById("dataset-manual-target");
 const datasetGridModeInput = document.getElementById("dataset-grid-mode");
 const datasetPreviewResult = document.getElementById("dataset-preview-result");
 const datasetValidationResult = document.getElementById("dataset-validation-result");
 const datasetSummaryEl = document.getElementById("dataset-summary");
 const importResultCard = document.getElementById("import-result-card");
+const datasetPreviewPlot = document.getElementById("dataset-preview-plot");
+const datasetPreviewStatus = document.getElementById("dataset-preview-status");
+const datasetPreviewVersionInput = document.getElementById("dataset-preview-version");
+const datasetAndorHint = document.getElementById("dataset-andor-hint");
 const datasetCheckSummary = document.getElementById("dataset-check-summary");
 const datasetReadyCard = document.getElementById("dataset-ready-card");
 const datasetReadySummary = document.getElementById("dataset-ready-summary");
@@ -53,6 +61,9 @@ const datasetExportProcessedZipBtn = document.getElementById("dataset-export-pro
 const datasetMetadataDownloadBtn = document.getElementById("dataset-metadata-download-btn");
 const preprocessingConfigDownloadBtn = document.getElementById("preprocessing-config-download-btn");
 const datasetResetBtn = document.getElementById("dataset-reset-btn");
+const detectedMeasurementSummary = document.getElementById("detected-measurement-summary");
+const measurementApplyDetectedBtn = document.getElementById("measurement-apply-detected-btn");
+const measurementManualToggleBtn = document.getElementById("measurement-manual-toggle-btn");
 const activeDatasetBadge = document.getElementById("active-dataset-badge");
 const preprocessingCard = document.getElementById("preprocessing-card");
 const preprocessingPresetInput = document.getElementById("preprocessing-preset");
@@ -72,8 +83,11 @@ const prePlotLimitInput = document.getElementById("pre-plot-limit");
 const prePlotStrategyInput = document.getElementById("pre-plot-strategy");
 const prePlotVisibilityInput = document.getElementById("pre-plot-visibility");
 const analysisRecommendations = document.getElementById("analysis-recommendations");
+const analysisStepGuide = document.getElementById("analysis-step-guide");
+const analysisRunSummary = document.getElementById("analysis-run-summary");
 const modelConfigModeInput = document.getElementById("model-config-mode");
 const analysisGoalInput = document.getElementById("analysis-goal");
+const compareMethodsBtn = document.getElementById("compare-methods-btn");
 const helpDialog = document.getElementById("help-dialog");
 const themeToggleBtn = document.getElementById("theme-toggle-btn");
 const workflowModeInput = document.getElementById("workflow-mode");
@@ -141,10 +155,11 @@ const TARGET_SOURCE_OPTIONS = {
         ["none", "Без target"],
     ],
     txt_folder: [
+        ["none", "Без target"],
         ["folder_name", "Имя папки"],
+        ["filename_regex", "Regex из имени файла"],
         ["file_name", "Имя файла"],
         ["manual", "Один общий класс"],
-        ["none", "Без target"],
     ],
 };
 
@@ -157,6 +172,78 @@ function formatNumber(value) {
         return "н/д";
     }
     return Number(value).toFixed(2).replace(/\.00$/, "");
+}
+
+function uniqueValues(values = []) {
+    const out = [];
+    values.forEach((value) => {
+        if (value !== null && value !== undefined && value !== "" && !out.includes(value)) out.push(value);
+    });
+    return out;
+}
+
+function valuesFromMetadata(summaryOrMeta = {}, key) {
+    const meta = summaryOrMeta.metadata || summaryOrMeta || {};
+    const measurement = summaryOrMeta.measurement_metadata || meta.measurement_metadata || {};
+    const direct = meta[`${key}_values`] || measurement[`${key}_values`] || [];
+    const preview = Array.isArray(meta.sample_metadata_preview) ? meta.sample_metadata_preview : [];
+    const sampleValues = preview.map((item) => item?.[key]);
+    const single = meta[key] ?? measurement[key];
+    return uniqueValues([...(Array.isArray(direct) ? direct : [direct]), ...sampleValues, single]);
+}
+
+function formatDetectedValues(values, unit = "") {
+    const clean = uniqueValues(values);
+    if (!clean.length) return "";
+    const numeric = clean.map(Number).filter((value) => Number.isFinite(value));
+    if (numeric.length === clean.length) {
+        numeric.sort((a, b) => a - b);
+        if (numeric.length === 1) return `${formatNumber(numeric[0])}${unit}`;
+        return `${formatNumber(numeric[0])}-${formatNumber(numeric[numeric.length - 1])}${unit}, ${numeric.length} values`;
+    }
+    return `${clean.slice(0, 4).join(", ")}${clean.length > 4 ? `, +${clean.length - 4}` : ""}${unit}`;
+}
+
+function detectedMeasurementCards(summaryOrMeta = {}) {
+    return [
+        ["Щель", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "slit_width_um"), " мкм")],
+        ["Решётка", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "grating_lines_mm"), " штр./мм")],
+        ["Экспозиция", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "exposure_time_s"), " с")],
+        ["Накопления", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "accumulations"), "")],
+        ["Мощность", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "power_mw"), " мВт")],
+        ["Образец", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "sample_name"), "")],
+    ].filter(([, value]) => value);
+}
+
+function renderDetectedMeasurementSummary(summaryOrMeta = {}) {
+    if (!detectedMeasurementSummary) return;
+    const cards = detectedMeasurementCards(summaryOrMeta);
+    if (!cards.length) {
+        detectedMeasurementSummary.style.display = "none";
+        detectedMeasurementSummary.innerHTML = "";
+        if (measurementApplyDetectedBtn) measurementApplyDetectedBtn.disabled = true;
+        return;
+    }
+    detectedMeasurementSummary.style.display = "";
+    detectedMeasurementSummary.innerHTML = `
+        <strong>Обнаруженные параметры измерений</strong>
+        <div class="measurement-card-grid">
+            ${cards.map(([label, value]) => `<div class="measurement-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
+        </div>
+    `;
+    if (measurementApplyDetectedBtn) measurementApplyDetectedBtn.disabled = false;
+}
+
+function applyDetectedMeasurementValues(summaryOrMeta = importedDatasetSummary) {
+    const setIfSingle = (id, key, suffix = "") => {
+        const values = valuesFromMetadata(summaryOrMeta, key);
+        const el = document.getElementById(id);
+        if (el && values.length === 1) el.value = `${values[0]}${suffix}`;
+    };
+    setIfSingle("meta-slit-width", "slit_width_um", " um");
+    setIfSingle("meta-grating-lines", "grating_lines_mm");
+    setIfSingle("meta-integration-time", "exposure_time_s", " s");
+    setIfSingle("meta-accumulation-count", "accumulations");
 }
 
 function currentTheme() {
@@ -208,9 +295,20 @@ function themedLayout(layout = {}) {
 const plotConfig = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] };
 
 function newPlot(id, data, layout = {}, config = {}) {
-    plotRegistry.add(id);
-    ensureChartActions(id);
-    return Plotly.newPlot(id, data, themedLayout(layout), { ...plotConfig, ...config });
+    const element = typeof id === "string" ? document.getElementById(id) : id;
+    if (!element) {
+        console.warn(`Контейнер графика не найден: ${id}`);
+        return Promise.resolve(null);
+    }
+    if (typeof Plotly === "undefined") {
+        element.classList?.add("is-empty");
+        element.textContent = "Библиотека графиков не загружена.";
+        return Promise.resolve(null);
+    }
+    const plotId = element.id || (typeof id === "string" ? id : "");
+    if (plotId) plotRegistry.add(plotId);
+    ensureChartActions(plotId);
+    return Plotly.newPlot(element, data, themedLayout(layout), { ...plotConfig, ...config });
 }
 
 function applyTheme(theme) {
@@ -393,6 +491,17 @@ function humanError(data, fallback = "Операция не выполнена."
     return raw.replace(/^ValueError:\s*/i, "");
 }
 
+window.addEventListener("error", (event) => {
+    keepDatasetUploadVisible();
+    showToast("error", event.message || "Ошибка интерфейса. Блок загрузки оставлен доступным.");
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+    keepDatasetUploadVisible();
+    const reason = event.reason?.message || event.reason || "Ошибка интерфейса. Блок загрузки оставлен доступным.";
+    showToast("error", String(reason));
+});
+
 function renderErrorBox(element, data, fallback) {
     if (!element) return;
     const message = data?.user_message || data?.detail || fallback;
@@ -543,6 +652,8 @@ function updateModelAvailability() {
     });
     if (modelTypeInput.selectedOptions[0]?.disabled) {
         modelTypeInput.value = "pca";
+        selectedAnalysisTask = "explore";
+        selectedAnalysisMethod = "pca";
     }
     if (previewResult && activeDatasetId && targetType === "none") {
         previewResult.textContent = "Target отсутствует. Для классификации или регрессии нужен target; сейчас доступны PCA и кластеризация.";
@@ -568,8 +679,8 @@ function updateModelAdvancedSettings(modelType) {
         svm: ["kernel", "C", "gamma", "class_weight", "validation", "test_size", "random_state"],
         random_forest: ["n_estimators", "max_depth", "class_weight", "validation", "test_size", "random_state"],
         decision_tree: ["max_depth", "class_weight", "validation", "test_size", "random_state"],
-        kmeans: ["n_clusters", "random_state"],
-        hca: ["n_clusters", "linkage"],
+        kmeans: ["n_clusters", "random_state", "standardize_cluster"],
+        hca: ["n_clusters", "linkage", "standardize_cluster"],
         svr: ["kernel", "C", "gamma", "epsilon", "validation", "test_size", "random_state"],
         compare_classification: ["validation", "test_size", "random_state", "class_weight"],
         compare_regression: ["validation", "test_size", "random_state"],
@@ -579,6 +690,8 @@ function updateModelAdvancedSettings(modelType) {
     document.querySelectorAll("[data-model-param]").forEach((node) => {
         node.style.display = !simple && allowed.has(node.dataset.modelParam) ? "flex" : "none";
     });
+    renderAnalysisWorkflowGuide(importedDatasetSummary);
+    renderAnalysisRunSummary();
 }
 
 function autoTuneModelParams() {
@@ -590,16 +703,28 @@ function autoTuneModelParams() {
     const nFeatures = Number(summary.n_features || 2);
     const nClasses = Object.keys(summary.class_distribution || {}).length;
     let modelType = "pca";
-    if (goal === "classify") modelType = targetType === "categorical" ? "plsda" : "pca";
+    if (goal === "classify") {
+        modelType = targetType === "categorical" ? "plsda" : "pca";
+        if (targetType !== "categorical") showToast("В датасете не задан категориальный target. Для классификации выберите target или стратегию извлечения класса.", "warning");
+    }
     if (goal === "compare") {
         if (targetType === "categorical") modelType = "compare_classification";
         else if (targetType === "numeric") modelType = "compare_regression";
-        else modelType = "compare_clustering";
+        else {
+            modelType = "pca";
+            showToast("Для сравнения моделей с target нужен target. Сейчас доступны PCA и кластеризация.", "warning");
+        }
     }
     if (goal === "compare_regression") modelType = targetType === "numeric" ? "compare_regression" : "pca";
     if (goal === "cluster") modelType = "kmeans";
-    if (goal === "regress") modelType = targetType === "numeric" ? "pls" : "pca";
+    if (goal === "regress") {
+        modelType = targetType === "numeric" ? "pls" : "pca";
+        if (targetType !== "numeric") showToast("Для регрессии нужен числовой target.", "warning");
+    }
     modelTypeInput.value = modelType;
+    selectedAnalysisTask = goalForModelType(modelType);
+    selectedAnalysisMethod = modelType;
+    syncAnalysisSelectionToInputs();
     if (modelType === "pca") {
         if (nComponentsInput) nComponentsInput.value = String(Math.max(1, Math.min(2, nSamples, nFeatures)));
         if (doValidationInput) doValidationInput.value = "false";
@@ -624,6 +749,8 @@ function autoTuneModelParams() {
         if (randomStateInput) randomStateInput.value = "42";
     }
     updateTargetVisibility();
+    renderAnalysisWorkflowGuide(importedDatasetSummary);
+    renderAnalysisRunSummary();
 }
 
 function setLoadedModelBadge() {
@@ -667,7 +794,10 @@ function clearStructuredBlocks() {
     }
     const plotEl = document.getElementById("plot");
     if (plotEl && typeof Plotly !== "undefined") {
-        normalizePlotList(lastResultPlots).forEach((_, index) => Plotly.purge(`result-plot-${index}`));
+        normalizePlotList(lastResultPlots).forEach((_, index) => {
+            const plotNode = document.getElementById(`result-plot-${index}`);
+            if (plotNode) Plotly.purge(plotNode);
+        });
         Plotly.purge("plot");
         plotEl.innerHTML = "";
         plotEl.classList.remove("plot-stack");
@@ -783,10 +913,10 @@ function collectPredictionRows(payload) {
     const rows = [];
     if (Array.isArray(payload.predictions) && payload.predictions.length) {
         return payload.predictions.map((row, index) => ({
-            sample_id: row.sample_id || `sample_${index + 1}`,
-            source_file: row.source_file || "",
-            predicted: row.predicted ?? row.prediction ?? "",
-            confidence: row.confidence ?? "",
+            sample_id: row.sample_id || row.file_name || row.filename || `sample_${index + 1}`,
+            source_file: row.source_file || row.file_name || row.filename || "",
+            predicted: row.predicted ?? row.prediction ?? row.predicted_class ?? row.value ?? "",
+            confidence: row.confidence ?? row.probability ?? row.proba ?? row.score ?? "",
         }));
     }
     const batch = Array.isArray(payload.batch_results) ? payload.batch_results : [];
@@ -798,16 +928,16 @@ function collectPredictionRows(payload) {
                 sample_id: result.sample_ids?.[index] || `${item.filename || "sample"}:${index + 1}`,
                 source_file: item.filename || "",
                 predicted: Array.isArray(value) ? value.join(";") : value,
-                confidence: result.confidence?.[index] ?? "",
+                confidence: result.confidence?.[index] ?? result.probability?.[index] ?? result.proba?.[index] ?? "",
             });
         });
     });
     const aggregate = payload.aggregate_result || payload.result || {};
     if (!rows.length && Array.isArray(aggregate.predicted_classes)) {
-        aggregate.predicted_classes.forEach((value, index) => rows.push({ sample_id: `sample_${index + 1}`, source_file: "", predicted: value, confidence: "" }));
+        aggregate.predicted_classes.forEach((value, index) => rows.push({ sample_id: aggregate.sample_ids?.[index] || `sample_${index + 1}`, source_file: aggregate.source_files?.[index] || "", predicted: value, confidence: aggregate.confidence?.[index] ?? aggregate.probability?.[index] ?? "" }));
     }
     if (!rows.length && Array.isArray(aggregate.predictions)) {
-        aggregate.predictions.forEach((value, index) => rows.push({ sample_id: `sample_${index + 1}`, source_file: "", predicted: value, confidence: "" }));
+        aggregate.predictions.forEach((value, index) => rows.push({ sample_id: aggregate.sample_ids?.[index] || `sample_${index + 1}`, source_file: aggregate.source_files?.[index] || "", predicted: value, confidence: aggregate.confidence?.[index] ?? aggregate.probability?.[index] ?? "" }));
     }
     return rows;
 }
@@ -821,19 +951,18 @@ function renderPredictionsTable(payload) {
     }
     const rowsHtml = lastPredictionRows.map((row) => `
         <tr>
-            <td>${escapeHtml(row.sample_id)}</td>
-            <td>${escapeHtml(row.source_file)}</td>
+            <td>${escapeHtml(row.source_file || row.sample_id)}</td>
             <td><strong>${escapeHtml(row.predicted)}</strong></td>
             <td>${escapeHtml(row.confidence)}</td>
         </tr>
     `).join("");
     comparisonResult.innerHTML = `
         <div class="line-controls wrap">
-            <button type="button" class="btn" data-download-predictions-csv>Скачать predictions CSV</button>
-            <button type="button" class="btn" data-download-result-json>Скачать result JSON</button>
+            <button type="button" class="btn" data-download-predictions-csv>Скачать CSV результатов</button>
+            <button type="button" class="btn" data-download-result-json>Скачать JSON результата</button>
         </div>
         <table class="comparison-table">
-            <thead><tr><th>sample_id</th><th>source_file</th><th>prediction</th><th>confidence</th></tr></thead>
+            <thead><tr><th>Файл</th><th>Предсказанный класс / значение</th><th>Достоверность / вероятность</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
         </table>
     `;
@@ -864,7 +993,7 @@ function renderStructuredResult(payload, mode) {
         }
         const saved = payload.saved_model || {};
         if (resultExplainer) {
-            const bestMetric = payload.metrics?.f1_macro ?? payload.metrics?.accuracy ?? payload.metrics?.r2 ?? payload.validation?.metrics?.f1_macro ?? payload.validation?.metrics?.accuracy ?? "н/д";
+            const bestMetric = payload.metrics?.f1_macro ?? payload.metrics?.accuracy ?? payload.metrics?.r2 ?? payload.metrics?.silhouette_score ?? payload.metrics?.inertia ?? payload.validation?.metrics?.f1_macro ?? payload.validation?.metrics?.accuracy ?? "н/д";
             resultExplainer.textContent = [
                 "Анализ завершён.",
                 `метод: ${payload.model_type || saved.model_type || "н/д"}`,
@@ -876,6 +1005,8 @@ function renderStructuredResult(payload, mode) {
                 `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
                 `run_id: ${payload.run_id || payload.run?.run_id || "н/д"}`,
                 `Модель сохранена: ${saved.model_id || "unknown"} (${saved.model_type || "n/a"}).`,
+                "",
+                buildResultInterpretation(payload),
                 payload.warnings?.length ? `ограничения/предупреждения:\n- ${payload.warnings.join("\n- ")}` : "",
             ].join("\n");
         }
@@ -901,6 +1032,55 @@ function renderStructuredResult(payload, mode) {
         showResultTab("summary");
         scrollToResults();
     }
+}
+
+function buildResultInterpretation(payload = {}) {
+    const model = payload.model_type || payload.saved_model?.model_type || "";
+    const task = payload.task_type || "";
+    const metrics = payload.metrics || {};
+    const n = payload.summary?.n_samples || importedDatasetSummary?.n_samples || "";
+    if (model === "pca") {
+        const variance = metrics.explained_variance_total;
+        return [
+            "Как понимать результат:",
+            `PCA показывает главные направления изменчивости спектров${typeof variance === "number" ? `; первые компоненты объясняют ${(variance * 100).toFixed(1)}% дисперсии.` : "."}`,
+            "Если точки на PC1-PC2 образуют отдельные группы, в спектрах есть выраженная структура. Если группы перемешаны, различия слабые или требуют моделей с target.",
+        ].join("\n");
+    }
+    if (["kmeans", "hca"].includes(model) || task === "clustering") {
+        const clusters = metrics.n_clusters ?? payload.result?.n_clusters ?? "н/д";
+        const silhouette = metrics.silhouette_score;
+        const inertia = metrics.inertia;
+        return [
+            "Как понимать результат:",
+            `Алгоритм разделил ${n || "набор"} спектров на ${clusters} кластер(а).`,
+            silhouette !== undefined && silhouette !== null
+                ? `Silhouette score = ${Number(silhouette).toFixed(4)}. Значения ближе к 1 означают более выраженное разделение, около 0 — перекрытие кластеров.`
+                : "Silhouette score не рассчитан: вероятно, кластеров слишком мало или структура не подходит для метрики.",
+            inertia !== undefined ? `Inertia = ${Number(inertia).toFixed(4)}. Её удобно сравнивать между разными значениями n_clusters.` : "",
+            "Для физической интерпретации сравните средние спектры кластеров и распределение ширины щели/решётки по кластерам.",
+        ].filter(Boolean).join("\n");
+    }
+    if (["plsda", "svm", "random_forest", "decision_tree"].includes(model) || task === "classification") {
+        const f1 = metrics.f1_macro ?? payload.validation?.metrics?.f1_macro;
+        return [
+            "Как понимать результат:",
+            f1 !== undefined ? `F1-score macro = ${Number(f1).toFixed(4)}.` : "Основные метрики смотрите в таблице.",
+            "F1-score macro удобен при сравнении классов, потому что учитывает баланс precision и recall по каждому классу.",
+            "Confusion matrix показывает, где модель путает реальные классы с предсказанными.",
+        ].join("\n");
+    }
+    if (["pls", "svr"].includes(model) || task === "regression") {
+        const r2 = metrics.r2;
+        const rmse = metrics.rmse;
+        return [
+            "Как понимать результат:",
+            r2 !== undefined ? `R² = ${Number(r2).toFixed(4)}.` : "R² показывает долю объяснённой изменчивости target.",
+            rmse !== undefined ? `RMSE = ${Number(rmse).toFixed(4)}.` : "",
+            "Чем ближе точки к диагонали на графике истинных и предсказанных значений, тем точнее модель. График остатков помогает увидеть систематические ошибки.",
+        ].filter(Boolean).join("\n");
+    }
+    return "Как понимать результат:\nСмотрите таблицу метрик и графики. Если графики отсутствуют, метод не сформировал визуализацию для текущих данных.";
 }
 
 function appendRegressionPredictionsTable(predictions) {
@@ -942,7 +1122,7 @@ function renderComparisonResult(payload) {
     if (resultExplainer) {
         const bestRow = lastComparisonRows.find((row) => row.method === best || row.model_type === best) || {};
         const bestMetrics = bestRow.metrics || bestRow;
-        const bestMetric = bestMetrics.f1_macro ?? bestMetrics.accuracy ?? bestMetrics.r2 ?? bestMetrics.adjusted_rand_score ?? "н/д";
+        const bestMetric = bestMetrics.f1_macro ?? bestMetrics.accuracy ?? bestMetrics.r2 ?? bestMetrics.silhouette_score ?? bestMetrics.inertia ?? bestMetrics.adjusted_rand_score ?? "н/д";
         resultExplainer.textContent = [
             "Сравнение методов завершено.",
             `метод: ${best || "сравнение"}`,
@@ -954,6 +1134,9 @@ function renderComparisonResult(payload) {
             `статус: ${payload.status || run.status || "success"}`,
             `лучшая модель: ${best || "н/д"}`,
             `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
+            "",
+            "Как понимать результат:",
+            "Сравните методы по основной метрике в таблице. Для классификации ориентируйтесь на F1 macro, для регрессии — на R²/RMSE, для кластеризации — на silhouette score и распределение кластеров.",
             payload.warnings?.length ? `предупреждения:\n- ${payload.warnings.join("\n- ")}` : "",
         ].filter(Boolean).join("\n");
     }
@@ -983,9 +1166,13 @@ function buildComparisonChart(rows) {
             ? "accuracy"
             : rows.some((row) => row.metrics?.r2 !== undefined || row.r2 !== undefined)
                 ? "r2"
-                : rows.some((row) => row.metrics?.adjusted_rand_score !== undefined || row.adjusted_rand_score !== undefined)
-                    ? "adjusted_rand_score"
-                    : null;
+                        : rows.some((row) => row.metrics?.silhouette_score !== undefined || row.silhouette_score !== undefined)
+                        ? "silhouette_score"
+                        : rows.some((row) => row.metrics?.adjusted_rand_score !== undefined || row.adjusted_rand_score !== undefined)
+                            ? "adjusted_rand_score"
+                            : rows.some((row) => row.metrics?.inertia !== undefined || row.inertia !== undefined)
+                                ? "inertia"
+                                : null;
     if (!metric) return;
     const x = rows.map((row) => row.method || row.model_type || "model");
     const y = rows.map((row) => Number((row.metrics || row)[metric] || 0));
@@ -1009,21 +1196,32 @@ function renderMetricsTable(rows, bestMethod = "") {
         return;
     }
     lastComparisonRows = rows;
-    const metricKeys = ["accuracy", "precision_macro", "recall_macro", "f1_macro", "r2", "mae", "rmse", "n_clusters", "inertia", "adjusted_rand_score", "normalized_mutual_info_score"];
+    const metricKeys = ["accuracy", "precision_macro", "recall_macro", "f1_macro", "r2", "mae", "rmse", "n_clusters", "inertia", "silhouette_score", "cluster_distribution", "adjusted_rand_score", "normalized_mutual_info_score"];
     const activeKeys = metricKeys.filter((key) => rows.some((row) => row[key] !== undefined || row.metrics?.[key] !== undefined));
     const head = ["Метод", ...activeKeys, "Статус"].map((v) => `<th>${escapeHtml(v)}</th>`).join("");
     const body = rows.map((row) => {
         const metrics = row.metrics || row;
         const cells = activeKeys.map((key) => {
             const value = metrics[key];
-            return `<td>${typeof value === "number" ? value.toFixed(4) : escapeHtml(value ?? "")}</td>`;
+            return `<td>${typeof value === "number" ? value.toFixed(4) : escapeHtml(typeof value === "object" && value !== null ? JSON.stringify(value) : (value ?? ""))}</td>`;
         }).join("");
         const cls = row.method === bestMethod ? "comparison-best-row" : "";
         return `<tr class="${cls}"><td><strong>${escapeHtml(row.method || row.model_type || "model")}</strong></td>${cells}<td>${escapeHtml(row.status || "success")}</td></tr>`;
     }).join("");
     comparisonResult.innerHTML = `
         <table class="comparison-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+        <div class="metric-help">${metricHelpText(activeKeys)}</div>
     `;
+}
+
+function metricHelpText(keys = []) {
+    const lines = [];
+    if (keys.includes("f1_macro")) lines.push("F1 macro учитывает баланс precision и recall по каждому классу и удобен при несбалансированных классах.");
+    if (keys.includes("silhouette_score")) lines.push("Silhouette score показывает отделимость кластеров: ближе к 1 — лучше, около 0 — кластеры перекрываются.");
+    if (keys.includes("inertia")) lines.push("Inertia — суммарная внутрикластерная ошибка; её полезно сравнивать при разных n_clusters.");
+    if (keys.includes("r2")) lines.push("R² показывает качество аппроксимации: чем ближе к 1, тем лучше.");
+    if (keys.includes("rmse")) lines.push("RMSE показывает типичный масштаб ошибки прогноза в единицах target.");
+    return escapeHtml(lines.join(" "));
 }
 
 function renderPlot(plotPayload) {
@@ -1033,7 +1231,7 @@ function renderPlot(plotPayload) {
         const plot = document.getElementById("plot");
         if (plot) {
             plot.classList.add("is-empty");
-            plot.textContent = "Для этого метода графики не были сформированы.";
+            plot.textContent = "Для этого результата графики не сформированы";
         }
         return;
     }
@@ -1061,13 +1259,16 @@ function renderResultPlots(plots = []) {
     lastResultPlots = normalized;
     if (typeof Plotly !== "undefined") {
         plotRegistry.forEach((id) => {
-            if (id.startsWith("result-plot-")) Plotly.purge(id);
+            if (id.startsWith("result-plot-")) {
+                const node = document.getElementById(id);
+                if (node) Plotly.purge(node);
+            }
         });
     }
     plotBox.innerHTML = "";
     if (!normalized.length) {
         plotBox.classList.add("is-empty");
-        plotBox.textContent = "Для этого метода графики не были сформированы.";
+        plotBox.textContent = "Для этого результата графики не сформированы";
         return;
     }
     plotBox.classList.remove("is-empty");
@@ -1078,7 +1279,10 @@ function renderResultPlots(plots = []) {
         frame.id = id;
         frame.className = "plot-frame";
         plotBox.appendChild(frame);
-        newPlot(id, plot.data, plot.layout || { title: plot.title || `График ${index + 1}` });
+        newPlot(id, plot.data, plot.layout || { title: plot.title || `График ${index + 1}` }).catch((error) => {
+            frame.classList.add("is-empty");
+            frame.textContent = `График не построен: ${error.message || error}`;
+        });
     });
     markStepDone("results");
 }
@@ -1168,6 +1372,21 @@ function buildClassMeanTraces(dataset, source = "raw") {
     });
 }
 
+function datasetPreviewContainerId() {
+    return datasetPreviewPlot ? "dataset-preview-plot" : "dataset-plot";
+}
+
+function datasetHasTarget(summary = importedDatasetSummary) {
+    return !!(summary?.target_name || Object.keys(summary?.class_distribution || {}).length || summary?.target_type);
+}
+
+function safeDatasetPreviewStrategy(strategy) {
+    if ((strategy === "balanced_by_class" || strategy === "balanced") && !datasetHasTarget()) {
+        return "first_n";
+    }
+    return strategy === "first" ? "first_n" : strategy;
+}
+
 function renderDatasetPreviewPlot(containerId, previewData, options = {}) {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -1198,9 +1417,9 @@ function rerenderActivePreviewPlot() {
         return;
     }
     if (lastDatasetPreviewData) {
-        renderDatasetPreviewPlot("dataset-plot", lastDatasetPreviewData, {
+        renderDatasetPreviewPlot(datasetPreviewContainerId(), lastDatasetPreviewData, {
             linesCount: prePlotLimitInput?.value || "10",
-            selectionStrategy: prePlotStrategyInput?.value || "balanced_by_class",
+            selectionStrategy: safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class"),
         });
     }
 }
@@ -1261,6 +1480,17 @@ function setWorkflowMode(mode) {
     applyWorkflowMode();
 }
 
+function keepDatasetUploadVisible() {
+    const mode = workflowModeInput?.value || "full";
+    const importSection = document.getElementById("import-section");
+    if (importSection && !["infer", "history"].includes(mode)) {
+        importSection.style.display = "";
+    }
+    if (importResultCard && ["full", "preprocess"].includes(mode)) {
+        importResultCard.style.display = "";
+    }
+}
+
 function applyWorkflowMode() {
     const mode = workflowModeInput?.value || "full";
     const importSection = document.getElementById("import-section");
@@ -1287,6 +1517,7 @@ function applyWorkflowMode() {
     show(modelApplyCard, ["full", "infer"].includes(mode));
     show(runsSection, ["full", "history"].includes(mode));
     show(resultsSectionEl, ["full", "standard", "train", "infer", "history"].includes(mode) && Boolean(lastResultPayload));
+    keepDatasetUploadVisible();
     if (mode === "standard") {
         if (datasetPreviewResult) datasetPreviewResult.textContent = "Полный мастер импорта скрыт для правильного датасета.";
         if (datasetCheckSummary) datasetCheckSummary.textContent = "";
@@ -1340,7 +1571,7 @@ async function importStandardDataset() {
         useImportedDatasetForTraining();
         if (data.preview) {
             lastDatasetPreviewData = data.preview;
-            renderDatasetPreviewPlot("dataset-plot", data.preview, { linesCount: "10", selectionStrategy: "balanced_by_class" });
+            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: "10", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
         } else {
             await renderImportedSpectraPreview(importedDatasetId);
         }
@@ -1472,6 +1703,9 @@ function updateDatasetLayoutUI() {
     }
 
     updateDatasetLayoutCards();
+    if (layout === "txt_folder" && targetSource === "file_name") {
+        showToast("Каждый файл может образовать отдельный класс. Такой target непригоден для классификации; лучше выбрать 'Без target' или regex для группировки.", "warning");
+    }
     renderImportCheckSummary();
 }
 
@@ -1514,7 +1748,7 @@ function fillDatasetMappingControls(payload) {
         datasetTargetSourceInput.value = "column";
         if (datasetSheetModeInput) datasetSheetModeInput.value = "single_sheet";
     } else if (suggested === "txt_folder") {
-        datasetTargetSourceInput.value = "folder_name";
+        datasetTargetSourceInput.value = "none";
     }
     updateDatasetLayoutUI();
     updateProcessingBlockVisibility();
@@ -1539,8 +1773,16 @@ function renderDatasetPreview(payload) {
     }
     if (payload.zip) {
         lines.push(`Спектральных файлов в ZIP: ${payload.zip.spectral_file_count}`);
-        if (payload.zip.class_candidates.length) lines.push(`Кандидаты классов: ${payload.zip.class_candidates.join(", ")}`);
+        lines.push("Target: не задан по умолчанию");
+        lines.push("Датасет подходит для: PCA, k-means, HCA, анализ параметров спектрометра");
+        lines.push("Имена файлов будут сохранены как sample_id/source_file");
+        const detected = detectedMeasurementCards({ metadata: { ...(payload.zip.metadata || {}), sample_metadata_preview: payload.zip.sample_metadata_preview || [] } });
+        if (detected.length) {
+            lines.push("Обнаруженные параметры:");
+            detected.forEach(([label, value]) => lines.push(`- ${label}: ${value}`));
+        }
         if (payload.zip.nested_archives.length) lines.push(`Вложенные архивы: ${payload.zip.nested_archives.join(", ")}`);
+        renderDetectedMeasurementSummary({ metadata: { ...(payload.zip.metadata || {}), sample_metadata_preview: payload.zip.sample_metadata_preview || [] } });
     }
     datasetPreviewResult.textContent = lines.join("\n");
     renderImportCheckSummary();
@@ -1571,11 +1813,19 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
             lines.push(`- ID-колонка: ${datasetIdColumnInput.value || "не выбрана"}`);
             lines.push(`- target-колонка: ${validationSummary.target_name || "без target"}`);
         }
-        if (Object.keys(distribution).length) {
+        if (validationSummary.target_name && Object.keys(distribution).length) {
             lines.push("- классы:");
-            Object.entries(distribution).forEach(([cls, count]) => lines.push(`  ${cls} — ${count}`));
+            Object.entries(distribution).slice(0, 12).forEach(([cls, count]) => lines.push(`  ${cls} — ${count}`));
+            if (Object.keys(distribution).length > 12) lines.push(`  ... ещё ${Object.keys(distribution).length - 12}`);
         } else {
-            lines.push("- target: не используется");
+            lines.push("- Target: не задан");
+            lines.push("- Рекомендуемые задачи: PCA, кластеризация, анализ параметров спектрометра");
+        }
+        const detected = detectedMeasurementCards(validationSummary);
+        if (detected.length) {
+            lines.push("- обнаруженные параметры измерений:");
+            detected.forEach(([label, value]) => lines.push(`  ${label}: ${value}`));
+            renderDetectedMeasurementSummary(validationSummary);
         }
     } else if (datasetPreviewPayload?.excel?.sheets && layout === "excel_rows") {
         const sheet = firstExcelSheetPreview();
@@ -1593,7 +1843,23 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
         lines.push("- спектры: все числовые столбцы кроме оси");
     } else if (layout === "txt_folder" && datasetPreviewPayload?.zip) {
         lines.push(`- файлов спектров в ZIP: ${datasetPreviewPayload.zip.spectral_file_count}`);
-        lines.push("- target: из имени папки, если структура архива содержит папки классов");
+        const targetSource = datasetTargetSourceInput?.value || "none";
+        if (targetSource === "none") {
+            lines.push("- Target: не задан");
+            lines.push("- Доступны PCA, k-means, HCA и анализ параметров спектрометра");
+        } else if (targetSource === "file_name") {
+            lines.push("- target: имя файла");
+            lines.push("- предупреждение: каждый файл может образовать отдельный класс; для классификации это непригодно");
+        } else if (targetSource === "filename_regex") {
+            lines.push(`- target: regex ${datasetTargetRegexInput?.value || "не задан"}`);
+        } else {
+            lines.push(`- target: ${targetSource}`);
+        }
+        const detected = detectedMeasurementCards({ metadata: { ...(datasetPreviewPayload.zip.metadata || {}), sample_metadata_preview: datasetPreviewPayload.zip.sample_metadata_preview || [] } });
+        if (detected.length) {
+            lines.push("- обнаруженные параметры:");
+            detected.forEach(([label, value]) => lines.push(`  ${label}: ${value}`));
+        }
         lines.push(`- общая сетка: ${datasetGridModeInput.value === "first_axis" ? "ось первого спектра" : "пересечение диапазонов"}`);
     } else {
         lines.push("- нажмите «Предпросмотр», чтобы увидеть найденные колонки и размеры.");
@@ -1615,6 +1881,7 @@ function buildImportConfig() {
     const config = {
         layout,
         target_source: targetSource,
+        filename_regex: targetSource === "filename_regex" ? (datasetTargetRegexInput?.value.trim() || undefined) : undefined,
         manual_target: datasetManualTargetInput.value.trim() || undefined,
         measurement_metadata: buildMeasurementMetadata(),
     };
@@ -1708,7 +1975,9 @@ function renderDatasetSummary(summary) {
     const distributionLines = Object.keys(distribution).length
         ? Object.entries(distribution).map(([cls, count]) => `${cls} — ${count}`).join("\n")
         : "target не задан";
-    const targetDetails = summary.target_type === "numeric"
+    const targetDetails = !summary.target_name
+        ? "Target не задан. Доступны PCA, k-means, HCA и анализ параметров спектрометра."
+        : summary.target_type === "numeric"
         ? [
             `Тип target: numeric`,
             `Диапазон target: ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}`,
@@ -1718,6 +1987,7 @@ function renderDatasetSummary(summary) {
         ].filter(Boolean).join("\n")
         : `Классы:\n${distributionLines}`;
     const measurement = summary.measurement_metadata || {};
+    const detectedMeasurementLines = detectedMeasurementCards(summary).map(([label, value]) => `${label}: ${value}`).join("\n");
     const measurementLines = Object.keys(measurement).length
         ? [
             `ширина щели: ${measurement.slit_width || "не указана"}`,
@@ -1726,8 +1996,10 @@ function renderDatasetSummary(summary) {
             `время интеграции: ${measurement.integration_time || "не указано"}`,
             `накоплений: ${measurement.accumulation_count || "не указано"}`,
             `спектрометр: ${measurement.spectrometer_name || "не указан"}`,
+            detectedMeasurementLines ? `обнаружено в файлах:\n${detectedMeasurementLines}` : "",
         ].join("\n")
-        : "не указаны";
+        : (detectedMeasurementLines || "не указаны");
+    renderDetectedMeasurementSummary(summary);
     datasetSummaryEl.textContent = [
         `dataset_id: ${summary.dataset_id || importedDatasetId || "ещё не сохранён"}`,
         `Версия: ${summary.version || "raw"}`,
@@ -1749,6 +2021,32 @@ function renderDatasetSummary(summary) {
         `Первые sample_id: ${(summary.sample_ids_preview || []).join(", ")}`,
         `Источник: ${humanLayout(summary.source_layout)}`,
     ].join("\n");
+}
+
+function metadataHasSpectrometerParams(summary = {}) {
+    const meta = summary.metadata || {};
+    const preview = Array.isArray(meta.sample_metadata_preview) ? meta.sample_metadata_preview : [];
+    return Boolean(
+        meta.slit_width_um_values?.length ||
+        meta.grating_lines_mm_values?.length ||
+        preview.some((item) => item?.slit_width_um !== undefined || item?.grating_lines_mm !== undefined) ||
+        summary.measurement_metadata?.slit_width ||
+        summary.measurement_metadata?.grating_lines_per_mm
+    );
+}
+
+function renderAndorHint(summary = {}) {
+    if (!datasetAndorHint) return;
+    if (!metadataHasSpectrometerParams(summary)) {
+        datasetAndorHint.style.display = "none";
+        datasetAndorHint.textContent = "";
+        return;
+    }
+    datasetAndorHint.style.display = "";
+    datasetAndorHint.innerHTML = `
+        <p>Обнаружены параметры спектрометрической системы. Можно оценить влияние ширины щели и решётки на интенсивность, FWHM и SNR.</p>
+        <button type="button" class="btn" disabled title="Будет доступно после добавления анализа параметров спектрометра">Анализ щели и решётки</button>
+    `;
 }
 
 function renderDatasetReady(summary) {
@@ -1792,10 +2090,20 @@ function renderDatasetReady(summary) {
         </details>
     `;
     datasetReadyCard.style.display = "block";
+    if (datasetPreviewVersionInput) {
+        Array.from(datasetPreviewVersionInput.options).forEach((option) => {
+            if (option.value === "processed") option.disabled = !processedDatasetReady;
+        });
+        if (!processedDatasetReady && datasetPreviewVersionInput.value === "processed") {
+            datasetPreviewVersionInput.value = "raw";
+        }
+    }
     if (preprocessingCard) {
         preprocessingCard.style.display = workflowModeInput?.value === "standard" ? "none" : "block";
     }
+    renderAndorHint(summary);
     renderAnalysisRecommendations(summary);
+    renderAnalysisWorkflowGuide(summary);
     updateModelModeUI();
     markStepDone("check");
 }
@@ -1826,6 +2134,286 @@ function renderAnalysisRecommendations(summary) {
     analysisRecommendations.innerHTML = `<pre>${escapeHtml(lines.join("\n"))}</pre>${buttons.length ? `<div class="line-controls wrap">${buttons.join("")}</div>` : ""}`;
 }
 
+const ANALYSIS_METHOD_INFO = {
+    pca: ["PCA", "Сжимает спектры до нескольких главных компонент.", "Для визуального поиска групп, выбросов и общей структуры."],
+    kmeans: ["k-means", "Делит спектры на заданное число кластеров.", "Для поиска групп без заранее заданных классов."],
+    hca: ["HCA", "Строит иерархическую структуру сходства спектров.", "Для просмотра вложенных групп и близости образцов."],
+    plsda: ["PLS-DA", "Классифицирует спектры через латентные переменные.", "Для категориального target и сравнения классов."],
+    svm: ["SVM", "Классифицирует спектры в пространстве высокой размерности.", "Для устойчивого разделения сложных классов."],
+    random_forest: ["Random Forest", "Использует ансамбль деревьев решений.", "Для устойчивой классификации и сравнения с линейными методами."],
+    decision_tree: ["Decision Tree", "Строит простую интерпретируемую модель.", "Для быстрой базовой проверки."],
+    pls: ["PLS Regression", "Прогнозирует числовой параметр по спектру.", "Для концентраций и других количественных величин."],
+    svr: ["SVR", "Выполняет регрессию методом опорных векторов.", "Для нелинейной зависимости спектра и числового target."],
+    compare_classification: ["Сравнить классификаторы", "Запускает несколько классификаторов.", "Для выбора лучшего метода по метрикам."],
+    compare_regression: ["Сравнить регрессоры", "Запускает несколько регрессионных моделей.", "Для сравнения качества прогноза."],
+    compare_clustering: ["Сравнить кластеризацию", "Сравнивает варианты кластеризации.", "Для подбора числа групп и метода."],
+};
+
+function targetState(summary = importedDatasetSummary) {
+    const hasTarget = datasetHasTarget(summary);
+    const targetType = summary?.target_type || "none";
+    const numericTarget = hasTarget && targetType === "numeric";
+    const categoricalTarget = hasTarget && !numericTarget;
+    return { hasTarget, targetType, numericTarget, categoricalTarget };
+}
+
+function analysisTaskDefinitions(summary = importedDatasetSummary) {
+    const { categoricalTarget, numericTarget } = targetState(summary);
+    return [
+        {
+            goal: "explore",
+            title: "Визуальный анализ",
+            selectTitle: "Посмотреть структуру данных (PCA)",
+            methods: "PCA",
+            description: "Показать структуру спектров, группы и выбросы.",
+            enabled: true,
+            disabledReason: "",
+        },
+        {
+            goal: "cluster",
+            title: "Кластеризация",
+            selectTitle: "Найти группы спектров (кластеризация)",
+            methods: "k-means, HCA",
+            description: "Найти группы спектров без заранее заданных классов.",
+            enabled: true,
+            disabledReason: "",
+        },
+        {
+            goal: "classify",
+            title: "Классификация",
+            selectTitle: "Классифицировать спектры",
+            methods: "PLS-DA, SVM, Random Forest, Decision Tree",
+            description: "Обучить модель относить спектры к заданным классам.",
+            enabled: categoricalTarget,
+            disabledReason: "Нужен категориальный target.",
+        },
+        {
+            goal: "regress",
+            title: "Регрессия",
+            selectTitle: "Предсказать числовой параметр",
+            methods: "PLS Regression, SVR",
+            description: "Предсказать числовой параметр, например концентрацию.",
+            enabled: numericTarget,
+            disabledReason: "Нужен числовой target.",
+        },
+        {
+            goal: "compare",
+            title: "Сравнение методов",
+            selectTitle: "Сравнить методы",
+            methods: categoricalTarget ? "классификаторы" : numericTarget ? "регрессионные модели" : "нужен target",
+            description: "Запустить несколько моделей и сравнить их по метрикам.",
+            enabled: categoricalTarget || numericTarget,
+            disabledReason: "Для сравнения моделей с target нужен target.",
+        },
+    ];
+}
+
+function methodsForAnalysisGoal(goal, summary = importedDatasetSummary) {
+    const { categoricalTarget, numericTarget } = targetState(summary);
+    if (goal === "cluster") return ["kmeans", "hca"];
+    if (goal === "classify") return categoricalTarget ? ["plsda", "svm", "random_forest", "decision_tree"] : [];
+    if (goal === "regress") return numericTarget ? ["pls", "svr"] : [];
+    if (goal === "compare") {
+        if (categoricalTarget) return ["compare_classification"];
+        if (numericTarget) return ["compare_regression"];
+        return [];
+    }
+    return ["pca"];
+}
+
+function defaultTaskForSummary(summary = importedDatasetSummary) {
+    const { categoricalTarget, numericTarget } = targetState(summary);
+    if (categoricalTarget) return "classify";
+    if (numericTarget) return "regress";
+    return "cluster";
+}
+
+function defaultMethodForTask(goal, summary = importedDatasetSummary) {
+    const methods = methodsForAnalysisGoal(goal, summary);
+    if (goal === "compare") {
+        const { categoricalTarget, numericTarget } = targetState(summary);
+        if (categoricalTarget) return "compare_classification";
+        if (numericTarget) return "compare_regression";
+        return null;
+    }
+    return methods[0] || null;
+}
+
+function goalForModelType(modelType) {
+    if (["compare_classification", "compare_regression", "compare_clustering"].includes(modelType)) return "compare";
+    if (["kmeans", "hca", "compare_clustering"].includes(modelType)) return "cluster";
+    if (["plsda", "svm", "random_forest", "decision_tree"].includes(modelType)) return "classify";
+    if (["pls", "svr"].includes(modelType)) return "regress";
+    return "explore";
+}
+
+function analysisSelectionKey(summary = importedDatasetSummary) {
+    if (!summary) return "empty";
+    return [
+        summary.dataset_id || activeDatasetId || "no-id",
+        summary.target_name || "no-target",
+        summary.target_type || "none",
+        summary.n_samples || 0,
+        summary.n_features || 0,
+    ].join("|");
+}
+
+function syncAnalysisSelectionToInputs() {
+    if (analysisGoalInput && selectedAnalysisTask) analysisGoalInput.value = selectedAnalysisTask;
+    if (modelTypeInput && selectedAnalysisMethod) modelTypeInput.value = selectedAnalysisMethod;
+}
+
+function ensureAnalysisSelection(summary = importedDatasetSummary) {
+    const key = analysisSelectionKey(summary);
+    const tasks = analysisTaskDefinitions(summary);
+    const changedDataset = key !== lastAnalysisSelectionKey;
+    if (changedDataset) {
+        selectedAnalysisTask = defaultTaskForSummary(summary);
+        selectedAnalysisMethod = defaultMethodForTask(selectedAnalysisTask, summary);
+        lastAnalysisSelectionKey = key;
+    }
+    if (!selectedAnalysisTask) {
+        selectedAnalysisTask = defaultTaskForSummary(summary);
+    }
+    const task = tasks.find((item) => item.goal === selectedAnalysisTask);
+    if (!task?.enabled) {
+        selectedAnalysisTask = defaultTaskForSummary(summary);
+    }
+    const methods = methodsForAnalysisGoal(selectedAnalysisTask, summary);
+    if (selectedAnalysisTask === "compare") {
+        selectedAnalysisMethod = defaultMethodForTask("compare", summary);
+    } else if (!selectedAnalysisMethod || !methods.includes(selectedAnalysisMethod)) {
+        selectedAnalysisMethod = defaultMethodForTask(selectedAnalysisTask, summary);
+    }
+    syncAnalysisSelectionToInputs();
+    return { task: selectedAnalysisTask, method: selectedAnalysisMethod };
+}
+
+function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
+    if (!analysisStepGuide) return;
+    const { hasTarget, numericTarget, categoricalTarget } = targetState(summary);
+    const { task: selectedGoal, method: selectedModel } = ensureAnalysisSelection(summary);
+    const tasks = analysisTaskDefinitions(summary);
+    const taskOptions = tasks.map((task) => `
+        <option value="${escapeHtml(task.goal)}" ${selectedGoal === task.goal ? "selected" : ""} ${task.enabled ? "" : "disabled"}>
+            ${escapeHtml(task.selectTitle || task.title)}${task.enabled ? "" : ` — недоступно: ${task.disabledReason}`}
+        </option>
+    `).join("");
+    const methods = methodsForAnalysisGoal(selectedGoal, summary);
+    const methodCards = selectedGoal === "compare"
+        ? `<div class="analysis-empty-note">Будет запущено сравнение доступных методов.</div>`
+        : methods.length ? methods.map((method) => {
+        const [title, description, usage] = ANALYSIS_METHOD_INFO[method] || [method, "", ""];
+        const active = selectedModel === method;
+        return `
+            <button type="button" class="analysis-method-pill ${active ? "is-active" : ""}" data-recommend-model="${escapeHtml(method)}">
+                <div class="method-card-header">
+                    <div class="method-title">${escapeHtml(title)}</div>
+                    ${active ? `<span class="method-badge selected">✓ Выбрано</span>` : ""}
+                </div>
+                <p class="method-description">${escapeHtml(description)}</p>
+                <span class="method-use">${escapeHtml(usage)}</span>
+            </button>
+        `;
+    }).join("") : `<div class="analysis-empty-note">Для выбранной задачи сейчас нет доступных методов: проверьте target в датасете.</div>`;
+    const targetLine = hasTarget
+        ? `Target: ${summary?.target_name || "target"} · тип: ${numericTarget ? "числовой" : "категориальный"} · доступны ${categoricalTarget ? "классификация и сравнение методов" : "регрессия и сравнение методов"}`
+        : "Target не задан. Доступны PCA и кластеризация. Для классификации или регрессии нужен target";
+    analysisStepGuide.innerHTML = `
+        <div class="analysis-target-info ${hasTarget ? "analysis-target-info--ok" : "analysis-target-info--empty"}">${escapeHtml(targetLine)}</div>
+        <section class="analysis-section analysis-section--compact">
+            <h4>1. Что сделать?</h4>
+            <label class="analysis-select-label">
+                <span>Что сделать с датасетом?</span>
+                <select id="analysis-task-select" class="input-field">
+                    ${taskOptions}
+                </select>
+            </label>
+        </section>
+        <section class="analysis-section analysis-section--compact">
+            <h4>2. Каким методом?</h4>
+            <div class="analysis-method-list">${methodCards}</div>
+            <div id="analysis-selection-summary" class="analysis-selection-summary"></div>
+        </section>
+        <section class="analysis-section analysis-section--compact">
+            <h4>3. Параметры</h4>
+            <p class="analysis-next-step">В простом режиме параметры подобраны автоматически. Для ручной настройки включите расширенный режим ниже.</p>
+        </section>
+    `;
+    renderAnalysisRunSummary();
+}
+
+function renderAnalysisRunSummary() {
+    if (!analysisRunSummary) return;
+    ensureAnalysisSelection(importedDatasetSummary);
+    const modelType = selectedAnalysisMethod || modelTypeInput?.value || "";
+    const [modelTitle] = ANALYSIS_METHOD_INFO[modelType] || [modelType];
+    const task = analysisTaskDefinitions(importedDatasetSummary).find((item) => item.goal === selectedAnalysisTask);
+    const datasetVersion = trainDatasetVersionInput?.value === "processed" ? "processed" : "raw";
+    const targetName = importedDatasetSummary?.target_name || "не задан";
+    const simple = (modelConfigModeInput?.value || "simple") === "simple";
+    const trainBtn = document.getElementById("train-btn");
+    if (!selectedAnalysisTask || (!selectedAnalysisMethod && selectedAnalysisTask !== "compare")) {
+        analysisRunSummary.innerHTML = `<div class="analysis-run-summary__main">Сначала выберите задачу анализа и метод.</div>`;
+        const selectionSummary = document.getElementById("analysis-selection-summary");
+        if (selectionSummary) selectionSummary.textContent = "Сначала выберите задачу анализа и метод.";
+        if (trainBtn) {
+            trainBtn.disabled = true;
+            trainBtn.textContent = "Запустить анализ";
+        }
+        return;
+    }
+    const parts = [
+        `Выбрано: ${task?.title || "задача"}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
+        `данные: ${datasetVersion}`,
+        `target: ${targetName}`,
+    ];
+    const paramParts = [];
+    if (["kmeans", "hca", "compare_clustering"].includes(modelType)) {
+        paramParts.push(`число кластеров = ${document.getElementById("model-n-clusters")?.value || "2"}`);
+    }
+    if (["pca", "plsda", "pls"].includes(modelType)) {
+        paramParts.push(`число компонент = ${nComponentsInput?.value || "авто"}`);
+    }
+    if (["kmeans", "svm", "random_forest", "decision_tree", "svr"].includes(modelType)) {
+        paramParts.push(`случайное зерно = ${randomStateInput?.value || "42"}`);
+    }
+    if (paramParts.length) {
+        parts.push(`Параметры: ${paramParts.join(", ")}`);
+    }
+    const selectionSummary = document.getElementById("analysis-selection-summary");
+    const summaryText = parts.join(" · ");
+    if (selectionSummary) {
+        selectionSummary.textContent = summaryText;
+    }
+    if (trainBtn) {
+        const buttonLabels = {
+            pca: "Запустить PCA",
+            kmeans: "Запустить k-means",
+            hca: "Запустить HCA",
+            plsda: "Запустить PLS-DA",
+            svm: "Запустить SVM",
+            random_forest: "Запустить Random Forest",
+            decision_tree: "Запустить Decision Tree",
+            pls: "Запустить PLS Regression",
+            svr: "Запустить SVR",
+            compare_classification: "Сравнить методы",
+            compare_regression: "Сравнить методы",
+            compare_clustering: "Сравнить методы",
+        };
+        trainBtn.disabled = false;
+        trainBtn.textContent = selectedAnalysisTask === "compare" ? "Сравнить методы" : (buttonLabels[modelType] || "Запустить анализ");
+    }
+    analysisRunSummary.innerHTML = `
+        <div class="analysis-run-summary__main">${escapeHtml(summaryText)}</div>
+        ${simple ? `<div class="analysis-run-summary__hint">Параметры подобраны автоматически. Чтобы изменить их, включите расширенный режим.</div>` : ""}
+    `;
+    if (compareMethodsBtn) {
+        compareMethodsBtn.style.display = "none";
+        compareMethodsBtn.disabled = true;
+    }
+}
+
 function escapeHtml(value) {
     return String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -1838,9 +2426,14 @@ function escapeHtml(value) {
 function chooseRecommendedModel(modelType) {
     if (!modelType || ["warning", "preprocessing"].includes(modelType)) return;
     if (!modelTypeInput) return;
+    selectedAnalysisMethod = modelType;
+    selectedAnalysisTask = goalForModelType(modelType);
     modelTypeInput.value = modelType;
+    if (analysisGoalInput) analysisGoalInput.value = selectedAnalysisTask;
     updateModelAdvancedSettings(modelType);
     updateTargetVisibility();
+    renderAnalysisWorkflowGuide(importedDatasetSummary);
+    renderAnalysisRunSummary();
 }
 
 async function previewDatasetImport() {
@@ -1878,7 +2471,7 @@ async function validateDatasetImport(fromPreview = false) {
         renderDatasetValidation(data);
         if (data.preview) {
             lastDatasetPreviewData = data.preview;
-            renderDatasetPreviewPlot("dataset-plot", data.preview, { linesCount: "10", selectionStrategy: "balanced_by_class" });
+            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: "10", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
         }
         if (!fromPreview) {
             renderText({ import_config: buildImportConfig(), validation: data });
@@ -1920,7 +2513,7 @@ async function importDataset() {
         renderDatasetReady(data.summary);
         if (data.preview) {
             lastDatasetPreviewData = data.preview;
-            renderDatasetPreviewPlot("dataset-plot", data.preview, { linesCount: "10", selectionStrategy: "balanced_by_class" });
+            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: "10", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
         } else {
             await renderImportedSpectraPreview(importedDatasetId);
         }
@@ -1937,7 +2530,7 @@ async function importDataset() {
     }
 }
 
-async function renderImportedSpectraPreview(datasetId) {
+async function renderImportedSpectraPreviewLegacy(datasetId) {
     if (importResultCard) importResultCard.style.display = "";
     const limit = prePlotLimitInput?.value || "10";
     const strategy = prePlotStrategyInput?.value || "balanced_by_class";
@@ -2093,7 +2686,7 @@ function resetModelState() {
 }
 
 function resetCharts() {
-    ["dataset-plot", "preprocessing-plot", "validation-plot", "plot"].forEach((id) => Plotly.purge(id));
+    ["dataset-preview-plot", "dataset-plot", "preprocessing-plot", "validation-plot", "plot"].forEach((id) => Plotly.purge(id));
 }
 
 function resetMessages() {
@@ -2102,8 +2695,18 @@ function resetMessages() {
     if (datasetSummaryEl) datasetSummaryEl.textContent = "";
     if (datasetCheckSummary) datasetCheckSummary.textContent = "Проверка перед импортом появится после предпросмотра.";
     if (datasetReadySummary) datasetReadySummary.textContent = "";
+    if (datasetPreviewStatus) datasetPreviewStatus.textContent = "";
+    if (datasetAndorHint) {
+        datasetAndorHint.style.display = "none";
+        datasetAndorHint.textContent = "";
+    }
+    if (detectedMeasurementSummary) {
+        detectedMeasurementSummary.style.display = "none";
+        detectedMeasurementSummary.innerHTML = "";
+    }
+    if (measurementApplyDetectedBtn) measurementApplyDetectedBtn.disabled = true;
     if (textResult) textResult.textContent = "";
-    if (importResultCard) importResultCard.style.display = "none";
+    keepDatasetUploadVisible();
     if (rawJsonWrap) rawJsonWrap.style.display = "none";
     if (resultsSection) resultsSection.style.display = "none";
 }
@@ -2114,6 +2717,7 @@ function resetAnalysisWorkflow(reason = "new-file") {
     resetModelState();
     resetCharts();
     resetMessages();
+    applyWorkflowMode();
     if (preprocessingCard) preprocessingCard.style.display = "none";
     if (trainDatasetVersionInput) {
         trainDatasetVersionInput.value = "raw";
@@ -2141,6 +2745,7 @@ function updateDatasetFileHint() {
         }
     }
     resetAnalysisWorkflow("new-file");
+    keepDatasetUploadVisible();
     const files = Array.from(datasetFilesInput?.files || []);
     if (!datasetPreviewResult) {
         return;
@@ -2153,9 +2758,9 @@ function updateDatasetFileHint() {
 }
 
 async function previewFile() {
-    const file = trainFileInput.files[0];
+    const file = trainFileInput?.files?.[0];
     if (!file) {
-        previewResult.textContent = "Выберите файл для проверки.";
+        if (previewResult) previewResult.textContent = "Выберите файл для проверки.";
         return;
     }
 
@@ -2166,11 +2771,11 @@ async function previewFile() {
     const data = await response.json();
 
     if (!response.ok) {
-        previewResult.textContent = data.detail || "Ошибка валидации файла.";
+        if (previewResult) previewResult.textContent = data.detail || "Ошибка валидации файла.";
         return;
     }
 
-    previewResult.textContent = `Файл: ${data.filename}\nСпектров: ${data.sample_count}\nПризнаков: ${data.feature_count}\nФормат: ${data.source_format}`;
+    if (previewResult) previewResult.textContent = `Файл: ${data.filename}\nСпектров: ${data.sample_count}\nПризнаков: ${data.feature_count}\nФормат: ${data.source_format}`;
 }
 
 function numberValue(id, fallback) {
@@ -2198,12 +2803,14 @@ function setProcessingBlocks(blocks = {}) {
 
 function updateProcessingBlockVisibility() {
     const blocks = collectProcessingBlocks();
+    const preset = preprocessingPresetInput?.value || "none";
+    const showManualPanel = preset === "custom";
     const baselineWrap = document.getElementById("pre-baseline-method")?.closest("label");
     const smoothingWrap = document.getElementById("pre-smoothing-method")?.closest("label");
     const normalizationWrap = document.getElementById("pre-normalization-method")?.closest("label");
-    if (baselineWrap) baselineWrap.style.display = blocks.baseline ? "" : "none";
-    if (smoothingWrap) smoothingWrap.style.display = blocks.smoothing ? "" : "none";
-    if (normalizationWrap) normalizationWrap.style.display = blocks.normalization ? "" : "none";
+    if (baselineWrap) baselineWrap.style.display = (showManualPanel || blocks.baseline) ? "" : "none";
+    if (smoothingWrap) smoothingWrap.style.display = (showManualPanel || blocks.smoothing) ? "" : "none";
+    if (normalizationWrap) normalizationWrap.style.display = (showManualPanel || blocks.normalization) ? "" : "none";
     const peaks = document.getElementById("peaks-block-settings");
     if (peaks) peaks.style.display = blocks.peaks ? "" : "none";
     if (analysisGoalInput && blocks.model_compare) {
@@ -2288,8 +2895,11 @@ function updatePreprocessingPresetCards() {
     });
     const isCustom = preset === "custom";
     const details = document.getElementById("preprocessing-advanced");
-    if (details && !isCustom) details.open = false;
-    if (details) details.style.display = isCustom ? "" : "none";
+    if (details) {
+        details.style.display = "";
+        if (isCustom) details.open = true;
+    }
+    updateProcessingBlockVisibility();
     updatePreprocessingParamVisibility();
     renderPreprocessingConfigView();
 }
@@ -2300,6 +2910,7 @@ function updatePreprocessingParamVisibility() {
         document.querySelectorAll("[data-pre-param]").forEach((node) => {
             node.style.display = "none";
         });
+        updatePreprocessingActiveSummary();
         return;
     }
     const baseline = document.getElementById("pre-baseline-method")?.value || "off";
@@ -2310,10 +2921,57 @@ function updatePreprocessingParamVisibility() {
         const visible = (baseline !== "off" && key === baseline) || (smoothing !== "off" && key === smoothing) || (key === "crop" && crop);
         node.style.display = visible ? "flex" : "none";
     });
+    updatePreprocessingActiveSummary();
+    renderPreprocessingConfigView();
+}
+
+function updatePreprocessingActiveSummary() {
+    const baseline = document.getElementById("pre-baseline-method")?.value || "off";
+    const smoothing = document.getElementById("pre-smoothing-method")?.value || "off";
+    const normalization = document.getElementById("pre-normalization-method")?.value || "off";
+    const crop = document.getElementById("pre-crop-enabled")?.value === "true";
+    const states = { baseline: baseline !== "off", smoothing: smoothing !== "off", normalization: normalization !== "off", crop };
+    Object.entries(states).forEach(([key, enabled]) => {
+        const badge = document.querySelector(`[data-pre-status="${key}"]`);
+        if (!badge) return;
+        badge.textContent = enabled ? "Включено" : "Выключено";
+        badge.classList.toggle("pre-status-badge--on", enabled);
+    });
+    const steps = [];
+    if (states.baseline) steps.push(methodLabel(baseline));
+    if (states.smoothing) steps.push(methodLabel(smoothing));
+    if (states.normalization) steps.push(methodLabel(normalization));
+    if (states.crop) {
+        const min = document.getElementById("pre-crop-min")?.value || "...";
+        const max = document.getElementById("pre-crop-max")?.value || "...";
+        steps.push(`Crop ${min}-${max}`);
+    }
+    const summary = document.getElementById("preprocessing-active-summary");
+    if (summary) summary.textContent = `Активная обработка: ${steps.length ? steps.join(" → ") : "без предобработки"}`;
+}
+
+function resetPreprocessingToRaman() {
+    if (preprocessingPresetInput) preprocessingPresetInput.value = "custom";
+    const set = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+    };
+    set("pre-baseline-method", "als");
+    set("pre-smoothing-method", "savgol");
+    set("pre-normalization-method", "snv");
+    set("pre-crop-enabled", "false");
+    set("pre-als-lambda", "100000");
+    set("pre-als-p", "0.01");
+    set("pre-als-iterations", "10");
+    set("pre-sg-window", "15");
+    set("pre-sg-polyorder", "3");
+    updatePreprocessingPresetCards();
+    updatePreprocessingParamVisibility();
 }
 
 function renderPreprocessingPreview(payload) {
     lastPreprocessingPreview = payload;
+    if (!preprocessingResult) return;
     const summary = payload.preprocessing_summary || {};
     const quality = payload.quality || {};
     const warnings = payload.warnings?.length ? `\nПредупреждения:\n- ${payload.warnings.join("\n- ")}` : "";
@@ -2572,6 +3230,12 @@ async function applyPreprocessingToDataset() {
             });
             trainDatasetVersionInput.value = "processed";
         }
+        if (datasetPreviewVersionInput) {
+            Array.from(datasetPreviewVersionInput.options).forEach((option) => {
+                if (option.value === "processed") option.disabled = false;
+            });
+            datasetPreviewVersionInput.value = "processed";
+        }
         markStepDone("preprocess");
         clearGlobalStatus("Предобработка применена.");
         showToast("Обработанная версия датасета сохранена.", data.warnings?.length ? "warning" : "success");
@@ -2636,7 +3300,7 @@ async function trainModel() {
         return;
     }
 
-    const file = trainFileInput.files[0];
+    const file = trainFileInput?.files?.[0];
     if (!file) {
         alert("Выберите обучающий файл или нажмите «Использовать для обучения модели» после импорта датасета.");
         return;
@@ -2748,7 +3412,11 @@ async function refreshModels() {
                 ? `R2=${Number(metrics.r2).toFixed(3)}`
                 : metrics.explained_variance_total !== undefined
                     ? `EV=${Number(metrics.explained_variance_total).toFixed(3)}`
-                    : "";
+                    : metrics.silhouette_score !== undefined
+                        ? `silhouette=${Number(metrics.silhouette_score).toFixed(3)}`
+                        : metrics.inertia !== undefined
+                            ? `inertia=${Number(metrics.inertia).toFixed(3)}`
+                            : "";
         const key = `${model.model_type}:${model.model_id}`;
         return `
             <tr data-model-key="${escapeHtml(key)}">
@@ -3310,6 +3978,25 @@ function applyAnalysisConfig(config = {}) {
     updateTargetVisibility();
 }
 
+async function renderImportedSpectraPreview(datasetId) {
+    const limit = prePlotLimitInput?.value || "10";
+    const strategy = safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class");
+    const version = datasetPreviewVersionInput?.value || "raw";
+    if (datasetPreviewStatus) datasetPreviewStatus.textContent = "Загрузка графика датасета...";
+    try {
+        const response = await fetch(`/analysis/dataset/${datasetId}/spectra-preview?limit=${encodeURIComponent(limit)}&strategy=${encodeURIComponent(strategy)}&version=${encodeURIComponent(version)}`);
+        const data = await responseJsonOrError(response, "Не удалось построить предпросмотр спектров.");
+        if (!response.ok) throw new Error(humanError(data, "Не удалось построить предпросмотр спектров."));
+        lastDatasetPreviewData = data;
+        renderDatasetPreviewPlot(datasetPreviewContainerId(), data, { linesCount: limit, selectionStrategy: strategy });
+        if (datasetPreviewStatus) datasetPreviewStatus.textContent = `График обновлён (${version}).`;
+    } catch (error) {
+        if (datasetPreviewStatus) datasetPreviewStatus.textContent = error.message;
+        showToast(error.message, "error");
+        throw error;
+    }
+}
+
 function initAnalysisPage() {
     initTheme();
     bindClick("preview-btn", previewFile);
@@ -3351,6 +4038,14 @@ function initAnalysisPage() {
     bindClick("dataset-export-processed-xlsx-btn", () => exportImportedDataset("xlsx", "processed"));
     bindClick("dataset-export-processed-zip-btn", () => exportImportedDataset("zip", "processed"));
     bindClick("preprocessing-config-download-btn", downloadPreprocessingConfig);
+    bindClick("preprocessing-reset-raman-btn", resetPreprocessingToRaman);
+    bindClick("measurement-apply-detected-btn", () => {
+        applyDetectedMeasurementValues(datasetPreviewPayload?.zip ? { metadata: { ...(datasetPreviewPayload.zip.metadata || {}), sample_metadata_preview: datasetPreviewPayload.zip.sample_metadata_preview || [] } } : importedDatasetSummary);
+        showToast("Обнаруженные одиночные параметры подставлены в поля.", "success");
+    });
+    bindClick("measurement-manual-toggle-btn", () => {
+        document.getElementById("meta-slit-width")?.focus();
+    });
     bindClick("dataset-reset-btn", resetDatasetImport);
     bindClick("dataset-sheets-select-all", () => setAllSheetCheckboxes(true));
     bindClick("dataset-sheets-clear", () => setAllSheetCheckboxes(false));
@@ -3370,12 +4065,26 @@ function initAnalysisPage() {
     bindClick("export-run-btn", exportSelectedRun);
     bindClick("report-run-btn", reportSelectedRun);
     bindClick("delete-run-btn", deleteSelectedRun);
+    bindClick("compare-methods-btn", () => {
+        const { categoricalTarget, numericTarget } = targetState(importedDatasetSummary);
+        if (!categoricalTarget && !numericTarget) {
+            showToast("Для сравнения методов нужен target.", "warning");
+            return;
+        }
+        if (analysisGoalInput) analysisGoalInput.value = "compare";
+        if (modelTypeInput) modelTypeInput.value = categoricalTarget ? "compare_classification" : "compare_regression";
+        selectedAnalysisTask = "compare";
+        selectedAnalysisMethod = modelTypeInput?.value || (categoricalTarget ? "compare_classification" : "compare_regression");
+        updateModelAdvancedSettings(modelTypeInput?.value || "pca");
+        trainModel();
+    });
 
     document.addEventListener("click", (event) => {
         const target = event.target;
         const fullscreenId = target?.getAttribute?.("data-chart-fullscreen");
         const pngId = target?.getAttribute?.("data-chart-png");
-        const recommendedModel = target?.getAttribute?.("data-recommend-model");
+        const recommendedModel = target?.closest?.("[data-recommend-model]")?.getAttribute?.("data-recommend-model");
+        const goalCard = target?.closest?.("[data-analysis-goal-card]")?.getAttribute?.("data-analysis-goal-card");
         const bestModel = target?.getAttribute?.("data-load-best-model");
         const runExport = target?.getAttribute?.("data-run-export");
         const stepButton = target?.closest?.("[data-target-section]");
@@ -3392,6 +4101,20 @@ function initAnalysisPage() {
         if (fullscreenId) openFullscreenPlot(fullscreenId);
         if (pngId) downloadPlotPng(pngId);
         if (recommendedModel) chooseRecommendedModel(recommendedModel);
+        if (goalCard && analysisGoalInput) {
+            const task = analysisTaskDefinitions(importedDatasetSummary).find((item) => item.goal === goalCard);
+            if (!task?.enabled) {
+                showToast(task?.disabledReason || "Эта задача недоступна для текущего датасета.", "warning");
+                return;
+            }
+            selectedAnalysisTask = goalCard;
+            selectedAnalysisMethod = defaultMethodForTask(goalCard, importedDatasetSummary);
+            syncAnalysisSelectionToInputs();
+            updateModelAdvancedSettings(selectedAnalysisMethod || "pca");
+            updateTargetVisibility();
+            renderAnalysisWorkflowGuide(importedDatasetSummary);
+            renderAnalysisRunSummary();
+        }
         if (resultTab) showResultTab(resultTab);
         if (rowRunId) selectRun(rowRunId);
         if (rowModelKey) selectSavedModel(rowModelKey);
@@ -3416,6 +4139,25 @@ function initAnalysisPage() {
             setLoadedModelBadge();
             showToast("Лучшая модель выбрана для применения.", "success");
         }
+    });
+
+    document.addEventListener("change", (event) => {
+        const taskSelect = event.target?.closest?.("#analysis-task-select");
+        if (!taskSelect) return;
+        const goal = taskSelect.value;
+        const task = analysisTaskDefinitions(importedDatasetSummary).find((item) => item.goal === goal);
+        if (!task?.enabled) {
+            showToast(task?.disabledReason || "Эта задача недоступна для текущего датасета.", "warning");
+            renderAnalysisWorkflowGuide(importedDatasetSummary);
+            return;
+        }
+        selectedAnalysisTask = goal;
+        selectedAnalysisMethod = defaultMethodForTask(goal, importedDatasetSummary);
+        syncAnalysisSelectionToInputs();
+        updateModelAdvancedSettings(selectedAnalysisMethod || "pca");
+        updateTargetVisibility();
+        renderAnalysisWorkflowGuide(importedDatasetSummary);
+        renderAnalysisRunSummary();
     });
 
     document.querySelectorAll(".layout-card[data-layout]").forEach((card) => {
@@ -3459,6 +4201,7 @@ function initAnalysisPage() {
     [datasetIdColumnInput, datasetTargetColumnInput, datasetAxisColumnInput, datasetGridModeInput].forEach((input) => {
         if (input) input.addEventListener("change", renderImportCheckSummary);
     });
+    if (datasetTargetRegexInput) datasetTargetRegexInput.addEventListener("input", renderImportCheckSummary);
     document.querySelectorAll(".preset-card[data-preset]").forEach((card) => {
         card.addEventListener("click", () => {
             preprocessingPresetInput.value = card.dataset.preset;
@@ -3468,7 +4211,7 @@ function initAnalysisPage() {
     if (preprocessingPresetInput) {
         preprocessingPresetInput.addEventListener("change", updatePreprocessingPresetCards);
     }
-    ["pre-baseline-method", "pre-smoothing-method", "pre-crop-enabled"].forEach((id) => {
+    ["pre-baseline-method", "pre-smoothing-method", "pre-normalization-method", "pre-crop-enabled", "pre-crop-min", "pre-crop-max"].forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.addEventListener("change", updatePreprocessingParamVisibility);
     });
@@ -3479,15 +4222,38 @@ function initAnalysisPage() {
     [prePlotModeInput, prePlotScaleInput, prePlotLimitInput, prePlotStrategyInput, prePlotVisibilityInput].forEach((input) => {
         if (input) input.addEventListener("change", rerenderActivePreviewPlot);
     });
+    if (datasetPreviewVersionInput) {
+        datasetPreviewVersionInput.addEventListener("change", () => {
+            if (importedDatasetId) renderImportedSpectraPreview(importedDatasetId).catch(() => {});
+        });
+    }
     if (modelConfigModeInput) modelConfigModeInput.addEventListener("change", updateModelModeUI);
     if (analysisGoalInput) analysisGoalInput.addEventListener("change", autoTuneModelParams);
     if (modelTypeInput) {
         modelTypeInput.addEventListener("change", () => {
+            if (analysisGoalInput) analysisGoalInput.value = goalForModelType(modelTypeInput.value);
             updateTargetVisibility();
             updateModelAdvancedSettings(modelTypeInput.value);
+            renderAnalysisWorkflowGuide(importedDatasetSummary);
+            renderAnalysisRunSummary();
         });
         updateTargetVisibility();
     }
+    [
+        trainDatasetVersionInput,
+        nComponentsInput,
+        randomStateInput,
+        document.getElementById("model-n-clusters"),
+        document.getElementById("model-linkage"),
+        document.getElementById("model-kernel"),
+        document.getElementById("model-c"),
+        document.getElementById("model-gamma"),
+        document.getElementById("model-epsilon"),
+        document.getElementById("model-n-estimators"),
+        document.getElementById("model-max-depth"),
+    ].forEach((input) => {
+        if (input) input.addEventListener("change", renderAnalysisRunSummary);
+    });
     if (inferFileInput) {
         inferFileInput.addEventListener("change", updateInferFilesHint);
         updateInferFilesHint();

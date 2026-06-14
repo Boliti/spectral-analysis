@@ -26,6 +26,12 @@ users.db
 *.db
 *.sqlite
 *.sqlite3
+user_data/
+uploads/
+saved_models/
+saved_runs/
+results/
+datasets/
 uploads/*
 !uploads/.gitkeep
 user_data/*
@@ -45,6 +51,8 @@ results/reports/*
 *.joblib
 *.pkl
 *.pickle
+*.zip
+*.7z
 
 # Logs and temporary files
 logs/

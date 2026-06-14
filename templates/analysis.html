@@ -104,7 +104,7 @@
             <div id="standard-dataset-result" class="result-box">Если файл уже приведён к единому виду, полный мастер импорта не нужен.</div>
         </section>
 
-        <section class="card" id="import-result-card" style="display:none;">
+        <section class="card">
             <h3>Загрузка и предпросмотр</h3>
             <div class="line-controls wrap">
                 <input id="dataset-files" type="file" accept=".xlsx,.xls,.csv,.txt,.esp,.zip" multiple>
@@ -191,10 +191,15 @@
                             <option value="column">Колонка таблицы</option>
                             <option value="sheet_name">Имя листа Excel</option>
                             <option value="folder_name">Имя папки</option>
+                            <option value="filename_regex">Regex из имени файла</option>
                             <option value="file_name">Имя файла</option>
                             <option value="manual">Один общий класс</option>
                             <option value="none">Без target</option>
                         </select>
+                    </label>
+                    <label class="dataset-field" data-visible-for="txt_folder" data-target-source-field="filename_regex">Regex для класса
+                        <span class="field-hint">Используйте группу захвата. Например: sample_(control|disease)_</span>
+                        <input id="dataset-target-regex" class="input-field" type="text" placeholder="^([^_]+)_">
                     </label>
                     <label class="dataset-field" data-visible-for="excel_columns txt_folder" data-target-source-field="manual">Общий класс
                         <span class="field-hint">Используется, если всем спектрам нужно назначить один класс.</span>
@@ -213,6 +218,11 @@
                 <div class="subcard">
                     <h4>Параметры измерений</h4>
                     <p class="muted">Необязательно. Эти данные сохраняются в metadata датасета, config JSON и metadata модели.</p>
+                    <div id="detected-measurement-summary" class="measurement-detected" style="display:none;"></div>
+                    <div class="line-controls wrap">
+                        <button id="measurement-manual-toggle-btn" class="btn btn-secondary" type="button">Задать вручную</button>
+                        <button id="measurement-apply-detected-btn" class="btn btn-secondary" type="button" disabled>Применить ко всем спектрам</button>
+                    </div>
                     <div class="grid">
                         <label>Ширина входной щели
                             <input id="meta-slit-width" class="input-field" type="text" placeholder="Например, 50 мкм">
@@ -265,6 +275,19 @@
                     <button id="show-preprocessing-settings-btn" class="btn btn-secondary" type="button">Открыть настройки предобработки</button>
                 </div>
             </div>
+            <div id="dataset-validation-result" class="result-note"></div>
+            <div id="dataset-summary" class="result-box"></div>
+            <div id="dataset-andor-hint" class="result-box" style="display:none;"></div>
+            <div class="line-controls wrap">
+                <label>Версия данных для графика
+                    <select id="dataset-preview-version" class="input-field">
+                        <option value="raw">raw</option>
+                        <option value="processed" disabled>processed</option>
+                    </select>
+                </label>
+                <span id="dataset-preview-status" class="muted"></span>
+            </div>
+            <div id="dataset-preview-plot" class="plot-box"></div>
             <details class="export-details">
                 <summary>Дополнительный экспорт</summary>
                 <div class="line-controls wrap">
@@ -330,9 +353,11 @@
 
             <details id="preprocessing-advanced">
                 <summary>Показать расширенные настройки</summary>
-                <div class="grid">
-                    <label>Коррекция базовой линии
-                        <span class="field-hint">ALS удаляет плавный фон спектра, часто возникающий из-за флуоресценции.</span>
+                <div id="preprocessing-active-summary" class="preprocessing-active-summary">Активная обработка: без предобработки</div>
+                <button id="preprocessing-reset-raman-btn" class="btn btn-secondary" type="button">Сбросить к рекомендуемым Raman-настройкам</button>
+                <div class="grid preprocessing-method-grid">
+                    <label class="preprocessing-method-card" data-pre-section="baseline">1. Коррекция базовой линии <span class="pre-status-badge" data-pre-status="baseline">Выключено</span>
+                        <span class="field-hint">Коррекция удаляет медленный фон, часто возникающий из-за флуоресценции.</span>
                         <select id="pre-baseline-method" class="input-field">
                             <option value="off">Выключено</option>
                             <option value="als">ALS</option>
@@ -340,8 +365,8 @@
                             <option value="rolling_ball">Rolling Ball</option>
                         </select>
                     </label>
-                    <label>Сглаживание
-                        <span class="field-hint">Savitzky-Golay уменьшает шум и сохраняет форму пиков.</span>
+                    <label class="preprocessing-method-card" data-pre-section="smoothing">2. Сглаживание <span class="pre-status-badge" data-pre-status="smoothing">Выключено</span>
+                        <span class="field-hint">Сглаживание уменьшает шум, но при слишком большом окне может исказить пики.</span>
                         <select id="pre-smoothing-method" class="input-field">
                             <option value="off">Выключено</option>
                             <option value="savgol">Savitzky-Golay</option>
@@ -350,8 +375,8 @@
                             <option value="whittaker">Whittaker</option>
                         </select>
                     </label>
-                    <label>Нормализация
-                        <span class="field-hint">SNV помогает сравнивать спектры разной интенсивности.</span>
+                    <label class="preprocessing-method-card" data-pre-section="normalization">3. Нормализация <span class="pre-status-badge" data-pre-status="normalization">Выключено</span>
+                        <span class="field-hint">Нормализация позволяет сравнивать спектры разной интенсивности.</span>
                         <select id="pre-normalization-method" class="input-field">
                             <option value="off">Выключено</option>
                             <option value="snv">SNV</option>
@@ -381,7 +406,8 @@
                     <label data-pre-param="moving_average">Moving window <input id="pre-ma-window" class="input-field" type="number" value="5" min="2"></label>
                     <label data-pre-param="whittaker">Whittaker lambda <input id="pre-whittaker-lambda" class="input-field" type="number" value="1000" min="1"></label>
                     <label data-pre-param="whittaker">Whittaker order <input id="pre-whittaker-order" class="input-field" type="number" value="2" min="1"></label>
-                    <label>Обрезать диапазон
+                    <label class="preprocessing-method-card" data-pre-section="crop">4. Обрезка диапазона <span class="pre-status-badge" data-pre-status="crop">Выключено</span>
+                        <span class="field-hint">Обрезка исключает малоинформативные или шумные края спектра.</span>
                         <select id="pre-crop-enabled" class="input-field">
                             <option value="false">Нет</option>
                             <option value="true">Да</option>
@@ -452,10 +478,9 @@
             <div id="preprocessing-plot" class="plot-box"></div>
         </section>
 
-        <section class="card">
+        <section class="card" style="display:none;">
             <h3>Результат импорта</h3>
-            <div id="dataset-validation-result" class="result-note"></div>
-            <div id="dataset-summary" class="result-box"></div>
+            <div class="result-note">Import result is shown in the dataset-ready block above.</div>
             <div id="dataset-plot" class="plot-box"></div>
         </section>
     </section>
@@ -476,14 +501,15 @@
 
         <section class="card">
             <h3>Настройки анализа</h3>
-            <div class="line-controls wrap">
+            <div id="analysis-step-guide" class="analysis-wizard"></div>
+            <div class="line-controls wrap analysis-mode-controls">
                 <label>Режим настройки
                     <select id="model-config-mode" class="input-field">
                         <option value="simple">Простой режим</option>
                         <option value="advanced">Расширенный режим</option>
                     </select>
                 </label>
-                <label>Цель анализа
+                <label class="analysis-legacy-goal">Цель анализа
                     <select id="analysis-goal" class="input-field">
                         <option value="explore">Визуально изучить структуру данных</option>
                         <option value="classify">Классифицировать спектры</option>
@@ -496,8 +522,9 @@
             </div>
             <p id="target-source-note" class="loaded-badge loaded-badge--ok" style="display:none;"></p>
             <p id="auto-model-note" class="muted">Параметры будут подобраны автоматически. Их можно изменить в расширенных настройках.</p>
+            <div id="analysis-run-summary" class="analysis-run-summary"></div>
             <div class="grid model-advanced-field">
-                <label>Тип модели
+                <label class="analysis-legacy-model-type">Тип модели
                     <select id="model-type" class="input-field">
                         <option value="pca">PCA</option>
                         <option value="plsda">PLS-DA (классификация)</option>
@@ -513,16 +540,18 @@
                         <option value="compare_clustering">Сравнить кластеризацию</option>
                     </select>
                 </label>
-                <label>Название модели
+                <label class="analysis-optional-model-name">Название модели
                     <input id="model-name" class="input-field" type="text" placeholder="Например, pca_plasma_batch_01">
                 </label>
-                <label data-model-param="n_components">n_components
+                <label data-model-param="n_components">Число компонент
+                    <span class="field-hint">Сколько латентных компонент использовать.</span>
                     <input id="n-components" class="input-field" type="number" min="1" placeholder="2">
                 </label>
-                <label data-model-param="n_clusters">n_clusters
+                <label data-model-param="n_clusters">Число кластеров
+                    <span class="field-hint">Сколько групп нужно найти.</span>
                     <input id="model-n-clusters" class="input-field" type="number" min="2" value="2">
                 </label>
-                <label data-model-param="kernel">kernel
+                <label data-model-param="kernel">Ядро модели
                     <select id="model-kernel" class="input-field">
                         <option value="rbf">rbf</option>
                         <option value="linear">linear</option>
@@ -531,33 +560,40 @@
                     </select>
                 </label>
                 <label data-model-param="C">C
+                    <span class="field-hint">Сила регуляризации.</span>
                     <input id="model-c" class="input-field" type="number" min="0.01" step="0.1" value="1.0">
                 </label>
                 <label data-model-param="gamma">gamma
+                    <span class="field-hint">Параметр ядра для RBF.</span>
                     <input id="model-gamma" class="input-field" type="text" value="scale">
                 </label>
                 <label data-model-param="epsilon">epsilon
                     <input id="model-epsilon" class="input-field" type="number" min="0" step="0.05" value="0.1">
                 </label>
-                <label data-model-param="n_estimators">n_estimators
+                <label data-model-param="n_estimators">Число деревьев
                     <input id="model-n-estimators" class="input-field" type="number" min="1" step="10" value="200">
                 </label>
-                <label data-model-param="max_depth">max_depth
+                <label data-model-param="max_depth">Максимальная глубина
                     <input id="model-max-depth" class="input-field" type="number" min="1" placeholder="без ограничения">
                 </label>
-                <label data-model-param="class_weight">class_weight
+                <label data-model-param="class_weight">Вес классов
                     <select id="model-class-weight" class="input-field">
-                        <option value="">none</option>
+                        <option value="">нет</option>
                         <option value="balanced">balanced</option>
                     </select>
                 </label>
-                <label data-model-param="linkage">linkage
+                <label data-model-param="linkage">Способ объединения
                     <select id="model-linkage" class="input-field">
                         <option value="ward">ward</option>
                         <option value="complete">complete</option>
                         <option value="average">average</option>
                         <option value="single">single</option>
                     </select>
+                </label>
+                <label data-model-param="standardize_cluster">
+                    <span>Стандартизировать признаки перед кластеризацией</span>
+                    <span class="field-hint">Для k-means и HCA это включено по умолчанию, чтобы признаки с большим масштабом не доминировали.</span>
+                    <input id="model-standardize-cluster" type="checkbox" checked disabled>
                 </label>
             </div>
 
@@ -583,15 +619,18 @@
                         <option value="false">Выключена</option>
                     </select>
                 </label>
-                <label data-model-param="test_size">test_size (0.1 - 0.5)
+                <label data-model-param="test_size">Доля тестовой выборки (0.1 - 0.5)
                     <input id="test-size" class="input-field" type="number" min="0.1" max="0.5" step="0.05" value="0.3">
                 </label>
-                <label data-model-param="random_state">random_state
+                <label data-model-param="random_state">Случайное зерно
                     <input id="random-state" class="input-field" type="number" step="1" value="42">
                 </label>
             </div>
 
-            <button id="train-btn" class="btn btn-primary">Запустить анализ и сохранить модель</button>
+            <div class="line-controls wrap analysis-run-actions">
+                <button id="train-btn" class="btn btn-primary">Запустить анализ</button>
+                <button id="compare-methods-btn" class="btn btn-secondary" type="button" style="display:none;">Сравнить методы</button>
+            </div>
         </section>
     </section>
 

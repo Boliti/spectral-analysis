@@ -28,7 +28,7 @@ from data_processing import (
 
 
 NUMERIC_TARGET_COLUMN_HINTS = {"conc (y)", "total_protein (y)", "conc_total_protein (y)", "concentration", "target", "y"}
-CLASS_TARGET_COLUMN_HINTS = {"conc (class)", "class", "group", "label"}
+CLASS_TARGET_COLUMN_HINTS = {"conc (class)", "class", "group", "label", "diagnosis"}
 TARGET_COLUMN_HINTS = NUMERIC_TARGET_COLUMN_HINTS | CLASS_TARGET_COLUMN_HINTS
 ID_COLUMN_HINTS = {"id", "sample", "sample_id", "name", "filename"}
 AXIS_COLUMN_HINTS = {"wavenumber", "wave", "#wave", "raman", "shift", "x", "cm-1", "cm^-1"}
@@ -148,7 +148,12 @@ class SpectralDataset:
             source_format=self.source_layout,
             filename=";".join(self.source_files[:3]),
             file_format=self.source_layout,
-            metadata={**dict(self.metadata), "dataset_version": version, "preprocessing": self.preprocessing_config if version == "processed" else {}},
+            metadata={
+                **dict(self.metadata),
+                "sample_metadata": self.sample_metadata or [],
+                "dataset_version": version,
+                "preprocessing": self.preprocessing_config if version == "processed" else {},
+            },
         )
 
     def import_config(self) -> Dict[str, Any]:
@@ -173,6 +178,13 @@ class SpectralDataset:
             "source_files": summary.get("source_files"),
             "source_sheets": summary.get("selected_sheets"),
             "spectrometer_parameters": summary.get("measurement_metadata"),
+            "detected_metadata": self.metadata.get("sample_metadata_preview") or [],
+            "slit_width_um_values": self.metadata.get("slit_width_um_values") or [],
+            "grating_lines_mm_values": self.metadata.get("grating_lines_mm_values") or [],
+            "exposure_time_s_values": self.metadata.get("exposure_time_s_values") or [],
+            "accumulations_values": self.metadata.get("accumulations_values") or [],
+            "power_mw_values": self.metadata.get("power_mw_values") or [],
+            "sample_name_values": self.metadata.get("sample_name_values") or [],
             "recommended_methods": summary.get("recommended_methods"),
             "task_recommendation": summary.get("task_recommendation"),
             "used_version": version,
@@ -335,6 +347,16 @@ def _sheet_preview(name: str, df: pd.DataFrame) -> Dict[str, Any]:
 
 def _detect_excel_layout(sheets: Dict[str, pd.DataFrame]) -> Tuple[str, float, List[str]]:
     reasons: List[str] = []
+    first_name, first_df = next(iter(sheets.items()))
+    first_clean = first_df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    first_columns = [str(col) for col in first_clean.columns]
+    first_numeric_header_count = sum(_numeric_header(col) for col in first_columns)
+    first_has_target = any(_looks_like_target_column(col) for col in first_columns)
+    first_has_id = any(_looks_like_id_column(col) for col in first_columns)
+    if first_has_target and first_numeric_header_count >= 3:
+        reasons.append(f"Лист '{first_name}' содержит target-колонку и числовые заголовки спектральных признаков.")
+        return "excel_rows", 0.9 if first_has_id else 0.8, reasons
+
     if len(sheets) > 1:
         column_like = 0
         for sheet_name, df in sheets.items():
@@ -372,7 +394,7 @@ def _zip_file_entries(file_data: UploadedFileData) -> Tuple[List[str], List[str]
             names = [name for name in archive.namelist() if not name.endswith("/")]
     except zipfile.BadZipFile as exc:
         raise DatasetImportError("ZIP-архив поврежден или имеет неверный формат.") from exc
-    spectra = [name for name in names if _extension(name) in {"txt", "csv", "esp"}]
+    spectra = [name for name in names if _extension(name) in {"txt", "csv", "esp", "asc"}]
     nested_archives = [name for name in names if _extension(name) in {"zip", "rar", "7z"}]
     return spectra, nested_archives
 
@@ -390,7 +412,7 @@ def auto_detect_layout(files: Sequence[UploadedFileData]) -> Dict[str, Any]:
         if nested_archives:
             reasons.append("Найдены вложенные архивы: " + ", ".join(nested_archives[:10]))
         return {"layout": "txt_folder" if spectra else "manual", "confidence": 0.9 if spectra else 0.2, "reasons": reasons}
-    if all(_extension(file.filename) in {"txt", "csv", "esp"} for file in files):
+    if all(_extension(file.filename) in {"txt", "csv", "esp", "asc"} for file in files):
         return {
             "layout": "txt_folder",
             "confidence": 0.75,
@@ -409,18 +431,21 @@ def preview_files(files: Sequence[UploadedFileData]) -> Dict[str, Any]:
         "files": [{"filename": item.filename, "size": len(item.content), "format": _extension(item.filename)} for item in files],
         "suggested_layout": detected,
         "layouts": ["excel_columns", "excel_rows", "txt_folder", "long_table"],
-        "target_options": ["column", "sheet_name", "folder_name", "file_name", "manual", "none", "target_file"],
+        "target_options": ["column", "sheet_name", "folder_name", "filename_regex", "file_name", "manual", "none", "target_file"],
     }
     if len(files) == 1 and _is_excel(file.filename):
         sheets = _read_excel_sheets(file, header=0)
         result["excel"] = {"sheets": [_sheet_preview(name, df) for name, df in sheets.items()]}
     elif len(files) == 1 and _is_zip(file.filename):
         spectra, nested_archives = _zip_file_entries(file)
+        preview_metadata = [_metadata_from_spectrum_filename(name) for name in spectra[:500]]
         result["zip"] = {
             "spectral_files": spectra[:200],
             "spectral_file_count": len(spectra),
             "nested_archives": nested_archives,
             "class_candidates": sorted({Path(name).parts[0] for name in spectra if len(Path(name).parts) > 1}),
+            "metadata": _detected_measurement_metadata(preview_metadata),
+            "sample_metadata_preview": preview_metadata[:10],
         }
     else:
         result["separate_files"] = [item.filename for item in files]
@@ -710,7 +735,12 @@ class ExcelColumnSpectraParser:
             if not sample_columns or sample_columns == "all_except_axis":
                 sample_columns = [col for col in df.columns if col != axis_col]
             for column in sample_columns:
-                values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)[order]
+                numeric_values = pd.to_numeric(df[column], errors="coerce")
+                if numeric_values.notna().sum() < len(df):
+                    if str(column).lower().startswith("unnamed") or numeric_values.notna().sum() == 0:
+                        warnings.append(f"Столбец '{column}' на листе '{sheet_name}' пропущен: не является полным числовым спектром.")
+                        continue
+                values = numeric_values.to_numpy(dtype=float)[order]
                 if np.isnan(values).any():
                     raise DatasetImportError(f"Спектр '{column}' на листе '{sheet_name}' содержит пропуски/текст.")
                 if axis_ref is None:
@@ -920,10 +950,14 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "//")):
             continue
-        normalized = stripped.replace(",", ".")
-        values = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", normalized)
-        if len(values) >= 2:
-            rows.append((float(values[0]), float(values[1])))
+        normalized = stripped.replace(",", ".").replace(";", " ").replace("\t", " ")
+        parts = [part for part in normalized.split() if part]
+        if len(parts) < 2:
+            continue
+        try:
+            rows.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            continue
     if len(rows) < 2:
         raise DatasetImportError(f"Файл {filename} не содержит минимум две числовые пары x/intensity.")
     arr = np.asarray(rows, dtype=float)
@@ -934,16 +968,79 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
     return axis[order], intensity[order], reverse_axis
 
 
-def _target_from_path(name: str, source: str, manual_target: Optional[str]) -> Optional[str]:
+def _target_from_path(name: str, source: str, manual_target: Optional[str], filename_regex: Optional[str] = None) -> Optional[str]:
     path = Path(name)
-    if source == "folder_name":
+    if source in {"none", "no_target", "", None}:
+        return None
+    if source in {"folder_name", "class_from_folder"}:
         parts = path.parts
         return str(parts[-2]) if len(parts) > 1 else None
+    if source in {"filename_regex", "class_from_filename_regex"}:
+        if not filename_regex:
+            return None
+        match = re.search(filename_regex, str(name))
+        if not match:
+            return None
+        return str(match.group(1) if match.groups() else match.group(0))
     if source == "file_name":
         return path.stem
     if source == "manual":
         return manual_target or "class_1"
     return None
+
+
+def _metadata_from_spectrum_filename(name: str) -> Dict[str, Any]:
+    filename = Path(name).name
+    stem = Path(filename).stem
+    text = filename.lower().replace(",", ".")
+    sample_name = re.sub(r"[_\s-]*\d+(?:\.\d+)?\s*mw(?:t)?", "", stem, flags=re.IGNORECASE)
+    sample_name = re.sub(r"[_\s-]*\d+(?:\.\d+)?\s*sec", "", sample_name, flags=re.IGNORECASE)
+    sample_name = re.sub(r"[_\s-]*x\d+", "", sample_name, flags=re.IGNORECASE)
+    sample_name = re.sub(r"[_\s-]*\d+[_\s-]*l[_\s-]*mm", "", sample_name, flags=re.IGNORECASE)
+    sample_name = re.sub(r"[_\s-]*slit[_\s-]*\d+(?:\.\d+)?\s*um", "", sample_name, flags=re.IGNORECASE)
+    sample_name = re.sub(r"[_\s-]+$", "", sample_name).strip("_ -") or stem
+    metadata: Dict[str, Any] = {
+        "sample_id": stem,
+        "sample_name": sample_name,
+        "source_file": name,
+    }
+    slit = re.search(r"slit[_\s-]*(\d+(?:\.\d+)?)\s*um", text)
+    grating = re.search(r"(\d+)[_\s-]*l[_\s-]*mm", text)
+    exposure = re.search(r"(\d+(?:\.\d+)?)\s*sec", text)
+    accumulations = re.search(r"x(\d+)", text)
+    power = re.search(r"(\d+(?:\.\d+)?)\s*mw(?:t)?", text)
+    if slit:
+        metadata["slit_width_um"] = float(slit.group(1))
+    if grating:
+        metadata["grating_lines_mm"] = int(grating.group(1))
+    if exposure:
+        metadata["exposure_time_s"] = float(exposure.group(1))
+    if accumulations:
+        metadata["accumulations"] = int(accumulations.group(1))
+    if power:
+        metadata["power_mw"] = float(power.group(1))
+    return metadata
+
+
+def _unique_metadata_values(sample_metadata: Sequence[Dict[str, Any]], key: str) -> List[Any]:
+    values = []
+    for item in sample_metadata:
+        value = item.get(key)
+        if value is not None and value not in values:
+            values.append(value)
+    return sorted(values)
+
+
+def _detected_measurement_metadata(sample_metadata: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    keys = ["slit_width_um", "grating_lines_mm", "exposure_time_s", "accumulations", "power_mw", "sample_name"]
+    detected: Dict[str, Any] = {}
+    for key in keys:
+        values = _unique_metadata_values(sample_metadata, key)
+        if values:
+            detected[f"{key}_values"] = values
+            if len(values) == 1:
+                detected[key] = values[0]
+    return detected
 
 
 def _common_grid(
@@ -987,21 +1084,28 @@ class TxtFolderSpectraParser:
                     if name.endswith("/"):
                         continue
                     ext = _extension(name)
-                    if ext in {"txt", "csv", "esp"}:
+                    if ext in {"txt", "csv", "esp", "asc"}:
                         entries.append((name, archive.read(name)))
                     elif ext in {"zip", "rar", "7z"}:
                         nested_archives.append(name)
         else:
-            entries = [(file.filename, file.content) for file in files if _extension(file.filename) in {"txt", "csv", "esp"}]
+            entries = [(file.filename, file.content) for file in files if _extension(file.filename) in {"txt", "csv", "esp", "asc"}]
         if not entries:
             raise DatasetImportError("Не найдены TXT/CSV/ESP спектры для режима один файл = один спектр.")
 
-        target_source = config.get("target_source", "folder_name")
+        target_source = config.get("target_source", "none")
         manual_target = config.get("manual_target")
+        filename_regex = config.get("filename_regex") or config.get("target_regex")
         spectra: List[Tuple[str, Optional[str], np.ndarray, np.ndarray, bool]] = []
+        sample_metadata: List[Dict[str, Any]] = []
         for name, content in entries:
             axis, intensity, reversed_axis = _parse_two_column_text(content, name)
-            spectra.append((name, _target_from_path(name, target_source, manual_target), axis, intensity, reversed_axis))
+            metadata = _metadata_from_spectrum_filename(name)
+            target = _target_from_path(name, target_source, manual_target, filename_regex)
+            if target is not None:
+                metadata["target"] = target
+            spectra.append((name, target, axis, intensity, reversed_axis))
+            sample_metadata.append(metadata)
 
         interpolation = config.get("interpolation") or {}
         enabled = bool(interpolation.get("enabled", True))
@@ -1027,6 +1131,19 @@ class TxtFolderSpectraParser:
 
         y = [target for _name, target, _axis, _intensity, _rev in spectra if target is not None]
         y_out = y if len(y) == len(spectra) else None
+        target_warning: Optional[str] = None
+        if y_out:
+            distribution = Counter(y_out)
+            if len(distribution) == len(y_out) and all(count == 1 for count in distribution.values()):
+                target_warning = (
+                    "Каждый файл образует отдельный класс. Такой target непригоден для классификации. "
+                    "Выберите 'Без target' или задайте regex, который группирует файлы в классы."
+                )
+                y_out = None
+        detected_measurements = _detected_measurement_metadata(sample_metadata)
+        slit_values = detected_measurements.get("slit_width_um_values", [])
+        grating_values = detected_measurements.get("grating_lines_mm_values", [])
+        measurement_metadata = {**detected_measurements, **_measurement_metadata(config)}
         return SpectralDataset(
             X=X.astype(float),
             axis=axis_out.astype(float),
@@ -1039,12 +1156,22 @@ class TxtFolderSpectraParser:
                 "nested_archives": nested_archives,
                 "reverse_axis_files": [name for name, _target, _axis, _intensity, rev in spectra if rev],
                 "interpolation": interpolation,
-                "measurement_metadata": _measurement_metadata(config),
+                "slit_width_um_values": slit_values,
+                "grating_lines_mm_values": grating_values,
+                "exposure_time_s_values": detected_measurements.get("exposure_time_s_values", []),
+                "accumulations_values": detected_measurements.get("accumulations_values", []),
+                "power_mw_values": detected_measurements.get("power_mw_values", []),
+                "sample_name_values": detected_measurements.get("sample_name_values", []),
+                "sample_metadata_preview": sample_metadata[:10],
+                "measurement_metadata": measurement_metadata,
+                "target_warning": target_warning,
+                "warnings": [target_warning] if target_warning else [],
                 "preprocessing_status": "not_applied",
             },
             source_layout="txt_folder",
             source_files=[item[0] for item in spectra],
             source_items=[item[0] for item in spectra],
+            sample_metadata=sample_metadata,
         )
 
 
@@ -1097,6 +1224,9 @@ def validate_dataset(dataset: SpectralDataset) -> Dict[str, Any]:
         warnings.append("Найдены дубликаты sample_id: " + ", ".join(duplicates[:10]))
     for warning in dataset.metadata.get("axis_warnings", []) if isinstance(dataset.metadata.get("axis_warnings"), list) else []:
         warnings.append(str(warning))
+    for warning in dataset.metadata.get("warnings", []) if isinstance(dataset.metadata.get("warnings"), list) else []:
+        if warning:
+            warnings.append(str(warning))
 
     distribution = dict(Counter(dataset.y or []))
     if distribution:

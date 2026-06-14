@@ -17,6 +17,7 @@ from sklearn.metrics import (
     r2_score,
     recall_score,
 )
+from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from services.analysis.model_manager import ModelManager
@@ -145,6 +146,10 @@ class AnalysisService:
             result["sample_ids"] = dataset.sample_names
         task_type = self._task_type(model.model_type)
         metrics = self._extract_metrics(model.model_type, result, validation)
+        warnings = []
+        if isinstance(validation, dict):
+            warnings.extend(validation.get("warnings", []) or [])
+        warnings.extend(result.get("warnings", []) or [])
 
         timestamp_name = _timestamp_name()
         display_name = (model_name or "").strip() or f"{model.model_type}_{timestamp_name}"
@@ -174,7 +179,7 @@ class AnalysisService:
             metadata.update(metadata_extra)
 
         saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata)
-        plots = self._build_plots(model.model_type, result, phase="training")
+        plots = self._build_plots(model.model_type, result, phase="training", dataset=dataset)
         plot = plots[0] if plots else {}
         prediction_rows = self._training_prediction_rows(result, dataset.sample_names)
 
@@ -196,7 +201,7 @@ class AnalysisService:
             "plot": plot,
             "plots": plots,
             "model_metadata": saved,
-            "warnings": validation.get("warnings", []) if isinstance(validation, dict) else [],
+            "warnings": warnings,
         }
 
     def _default_model_params(
@@ -281,7 +286,18 @@ class AnalysisService:
         if normalized in {"pls", "svr"}:
             return {key: result.get(key) for key in ["r2", "mae", "rmse"] if key in result}
         if normalized in {"kmeans", "hca"}:
-            return {key: result.get(key) for key in ["n_clusters", "inertia", "adjusted_rand_score", "normalized_mutual_info_score"] if key in result}
+            return {
+                key: result.get(key)
+                for key in [
+                    "n_clusters",
+                    "inertia",
+                    "silhouette_score",
+                    "cluster_distribution",
+                    "adjusted_rand_score",
+                    "normalized_mutual_info_score",
+                ]
+                if key in result
+            }
         return {}
 
     def _run_validation(
@@ -793,10 +809,16 @@ class AnalysisService:
             )
         return rows
 
-    def _build_plots(self, model_type: str, result: Dict[str, Any], phase: str) -> List[Dict[str, Any]]:
+    def _build_plots(self, model_type: str, result: Dict[str, Any], phase: str, dataset: Optional[SpectrumDataset] = None) -> List[Dict[str, Any]]:
         primary = self._build_plot(model_type, result, phase)
         plots = [primary] if primary else []
         normalized = self._normalize_model_type(model_type)
+        if phase == "training" and normalized == "pca":
+            plots.extend(self._pca_extra_plots(result))
+            if dataset is not None:
+                plots.extend(self._pca_metadata_plots(result, dataset))
+        if phase == "training" and normalized in {"kmeans", "hca"} and dataset is not None:
+            plots = self._cluster_plots(normalized, result, dataset) or plots
         if phase == "training" and normalized in {"pls", "svr"} and "y_true" in result and "y_pred" in result:
             y_true = np.asarray(result["y_true"], dtype=float)
             y_pred = np.asarray(result["y_pred"], dtype=float)
@@ -815,7 +837,13 @@ class AnalysisService:
                         },
                         {"type": "scatter", "mode": "lines", "x": [float(np.min(y_pred)), float(np.max(y_pred))], "y": [0, 0], "name": "0", "line": {"dash": "dash"}},
                     ],
-                    "layout": {"title": "Residual plot", "xaxis": {"title": "Predicted y"}, "yaxis": {"title": "Residual"}, "template": "plotly_white"},
+                    "layout": {"title": "График остатков", "xaxis": {"title": "Предсказанное значение"}, "yaxis": {"title": "Остаток"}, "template": "plotly_white"},
+                }
+            )
+            plots.append(
+                {
+                    "data": [{"type": "histogram", "x": residuals.tolist(), "name": "Остатки"}],
+                    "layout": {"title": "Распределение остатков", "xaxis": {"title": "Остаток"}, "yaxis": {"title": "Количество"}, "template": "plotly_white"},
                 }
             )
             plots.append(
@@ -824,12 +852,94 @@ class AnalysisService:
                         {"type": "scatter", "mode": "lines+markers", "x": list(range(1, len(y_pred) + 1)), "y": y_pred.tolist(), "name": "y_pred"},
                         {"type": "scatter", "mode": "markers", "x": list(range(1, len(y_true) + 1)), "y": y_true.tolist(), "name": "y_true"},
                     ],
-                    "layout": {"title": "Predicted values by sample", "xaxis": {"title": "Sample index"}, "yaxis": {"title": "Target"}, "template": "plotly_white"},
+                    "layout": {"title": "Истинные и предсказанные значения по образцам", "xaxis": {"title": "Номер образца"}, "yaxis": {"title": "Target"}, "template": "plotly_white"},
                 }
             )
             scores = np.asarray(result.get("x_scores", []), dtype=float)
             if normalized == "pls" and scores.ndim == 2 and scores.shape[0] == len(y_true) and scores.shape[1] >= 1:
-                plots.append(self._scatter_scores_plot(scores, y_true.tolist(), "PLS scores", "LV1", "LV2", samples))
+                plots.append(self._scatter_scores_plot(scores, y_true.tolist(), "PLS: латентные переменные", "LV1", "LV2", samples))
+        return plots
+
+    def _pca_extra_plots(self, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
+        if not ratios:
+            return []
+        x = [f"PC{i + 1}" for i in range(len(ratios))]
+        cumulative = np.cumsum(ratios).tolist()
+        return [
+            {
+                "data": [{"type": "bar", "x": x, "y": ratios, "name": "Доля дисперсии"}],
+                "layout": {"title": "PCA: доля объяснённой дисперсии", "xaxis": {"title": "Компонента"}, "yaxis": {"title": "Explained variance ratio"}, "template": "plotly_white"},
+            },
+            {
+                "data": [{"type": "scatter", "mode": "lines+markers", "x": x, "y": cumulative, "name": "Накопленная доля"}],
+                "layout": {"title": "PCA: накопленная объяснённая дисперсия", "xaxis": {"title": "Компонента"}, "yaxis": {"title": "Cumulative explained variance"}, "template": "plotly_white"},
+            },
+        ]
+
+    def _pca_metadata_plots(self, result: Dict[str, Any], dataset: SpectrumDataset) -> List[Dict[str, Any]]:
+        scores = np.asarray(result.get("scores", []), dtype=float)
+        if scores.ndim != 2 or scores.shape[0] == 0:
+            return []
+        plots: List[Dict[str, Any]] = []
+        sample_ids = result.get("sample_ids") or dataset.sample_names
+        for key, title in [("slit_width_um", "PCA: цвет по ширине щели"), ("grating_lines_mm", "PCA: цвет по решётке")]:
+            labels = self._metadata_series(dataset, key)
+            if len(labels) == scores.shape[0]:
+                plots.append(self._scatter_scores_plot(scores, labels, title, "PC1", "PC2", sample_ids))
+        return plots
+
+    def _metadata_series(self, dataset: SpectrumDataset, key: str) -> List[Any]:
+        meta = dataset.metadata or {}
+        rows = meta.get("sample_metadata") or meta.get("sample_metadata_preview") or []
+        if len(rows) == dataset.sample_count and any(isinstance(row, dict) and key in row for row in rows):
+            return [row.get(key) if isinstance(row, dict) else None for row in rows]
+        values = meta.get(f"{key}_values") or []
+        if len(values) == 1:
+            return [values[0]] * dataset.sample_count
+        return []
+
+    def _cluster_plots(self, model_type: str, result: Dict[str, Any], dataset: SpectrumDataset) -> List[Dict[str, Any]]:
+        labels = result.get("cluster_labels") or []
+        if not labels:
+            return []
+        labels_str = [str(v) for v in labels]
+        plots: List[Dict[str, Any]] = []
+        x = np.asarray(dataset.x, dtype=float)
+        sample_ids = dataset.sample_names or [f"sample_{idx + 1}" for idx in range(x.shape[0])]
+        if x.ndim == 2 and x.shape[0] >= 2 and x.shape[1] >= 2:
+            x_scaled = (x - np.nanmean(x, axis=0)) / np.where(np.nanstd(x, axis=0) == 0, 1, np.nanstd(x, axis=0))
+            scores = PCA(n_components=2).fit_transform(np.nan_to_num(x_scaled))
+            plots.append(self._scatter_scores_plot(scores, labels_str, f"{model_type}: PCA-проекция кластеров", "PC1", "PC2", sample_ids))
+        plots.append(class_count_plot(labels_str, f"{model_type}: распределение кластеров"))
+        axis = np.asarray(dataset.spectral_axis, dtype=float)
+        traces = []
+        for label in sorted(set(labels_str)):
+            idx = [i for i, value in enumerate(labels_str) if value == label]
+            if idx:
+                traces.append({"type": "scatter", "mode": "lines", "x": axis.tolist(), "y": np.nanmean(x[idx], axis=0).tolist(), "name": f"Кластер {label}"})
+        if traces:
+            plots.append({"data": traces, "layout": {"title": "Средние спектры по кластерам", "xaxis": {"title": "Спектральная ось"}, "yaxis": {"title": "Интенсивность"}, "template": "plotly_white"}})
+        slit = self._metadata_series(dataset, "slit_width_um")
+        if len(slit) == len(labels_str):
+            plots.append({
+                "data": [{"type": "box", "x": labels_str, "y": [float(v) if v is not None else None for v in slit], "boxpoints": "all"}],
+                "layout": {"title": "Ширина щели по кластерам", "xaxis": {"title": "Кластер"}, "yaxis": {"title": "Ширина щели, мкм"}, "template": "plotly_white"},
+            })
+        grating = self._metadata_series(dataset, "grating_lines_mm")
+        if len(grating) == len(labels_str):
+            cluster_values = sorted(set(labels_str))
+            grating_values = sorted({str(v) for v in grating if v is not None})
+            data = []
+            for gr in grating_values:
+                data.append({"type": "bar", "name": f"{gr} штр./мм", "x": cluster_values, "y": [sum(1 for lab, g in zip(labels_str, grating) if lab == cl and str(g) == gr) for cl in cluster_values]})
+            plots.append({"data": data, "layout": {"title": "Решётка внутри кластеров", "barmode": "stack", "xaxis": {"title": "Кластер"}, "yaxis": {"title": "Количество спектров"}, "template": "plotly_white"}})
+        target = result.get("target") or []
+        if target and len(target) == len(labels_str):
+            classes = sorted({str(v) for v in target})
+            clusters = sorted(set(labels_str))
+            matrix = [[sum(1 for t, c in zip(target, labels_str) if str(t) == cls and c == cl) for cl in clusters] for cls in classes]
+            plots.append({"data": [{"type": "heatmap", "z": matrix, "x": clusters, "y": classes, "colorscale": "Blues", "text": matrix}], "layout": {"title": "Реальные классы и кластеры", "xaxis": {"title": "Кластер"}, "yaxis": {"title": "Реальный класс"}, "template": "plotly_white"}})
         return plots
 
     def _build_plot(self, model_type: str, result: Dict[str, Any], phase: str) -> Dict[str, Any]:
@@ -842,7 +952,7 @@ class AnalysisService:
             ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
             x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
             y_title = f"PC2 ({ratios[1] * 100:.1f}% дисперсии)" if len(ratios) > 1 else "PC2"
-            return self._scatter_scores_plot(scores, result.get("target"), "PCA: PC1 vs PC2", x_title, y_title, result.get("sample_ids"))
+            return self._scatter_scores_plot(scores, result.get("target"), "PCA: PC1-PC2", x_title, y_title, result.get("sample_ids"))
 
         if normalized in {"pls", "svr"}:
             if phase == "training" and "y_true" in result and "y_pred" in result:
@@ -860,7 +970,7 @@ class AnalysisService:
             if not labels:
                 return {}
             if phase == "training" and result.get("confusion_matrix"):
-                return self._confusion_matrix_plot(result.get("confusion_matrix"), result.get("classes") or [], f"{normalized}: confusion matrix")
+                return self._confusion_matrix_plot(result.get("confusion_matrix"), result.get("classes") or [], f"{normalized}: матрица ошибок")
             return class_count_plot(labels, f"{normalized}: распределение предсказанных классов")
 
         if normalized in {"kmeans", "hca"}:

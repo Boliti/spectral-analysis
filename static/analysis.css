@@ -675,6 +675,335 @@ button:hover,
     margin-top: 12px;
 }
 
+.preprocessing-method-grid {
+    align-items: stretch;
+    margin-top: 12px;
+}
+
+.preprocessing-method-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    background: var(--surface-2);
+    gap: 8px;
+}
+
+.pre-status-badge {
+    display: inline-flex;
+    width: fit-content;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--muted);
+    background: var(--surface-3);
+}
+
+.pre-status-badge--on {
+    color: var(--success-text);
+    background: var(--success-bg);
+    border: 1px solid var(--success-border);
+}
+
+.preprocessing-active-summary {
+    margin: 8px 0 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    font-weight: 700;
+}
+
+.measurement-detected {
+    margin: 10px 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-2);
+}
+
+.measurement-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.measurement-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--surface);
+}
+
+.measurement-card span {
+    display: block;
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-bottom: 4px;
+}
+
+.analysis-wizard {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+    margin: 8px 0 16px;
+    padding: 0;
+    white-space: normal;
+}
+
+.analysis-section {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    background: var(--surface);
+}
+
+.analysis-section h4 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+}
+
+.analysis-section--compact {
+    padding: 12px 14px;
+}
+
+.analysis-mode-controls {
+    margin-top: 8px;
+}
+
+.analysis-legacy-goal {
+    display: none !important;
+}
+
+.analysis-legacy-model-type {
+    display: none !important;
+}
+
+.analysis-target-info,
+.analysis-next-step,
+.analysis-empty-note,
+.analysis-run-summary,
+.metric-help {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--surface-2);
+    color: var(--muted);
+    line-height: 1.4;
+}
+
+.analysis-target-info {
+    margin: 0;
+    font-weight: 650;
+}
+
+.analysis-target-info--ok {
+    color: var(--success-text);
+    background: var(--success-bg);
+    border-color: var(--success-border);
+}
+
+.analysis-target-info--empty {
+    color: var(--warning-text);
+    background: var(--warning-bg);
+    border-color: var(--warning-border);
+}
+
+.analysis-task-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+}
+
+.analysis-method-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+}
+
+.analysis-select-label {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    max-width: 520px;
+    font-weight: 700;
+}
+
+.analysis-select-label span {
+    color: var(--text);
+}
+
+.analysis-method-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.analysis-task-card,
+.analysis-method-card,
+.analysis-method-pill {
+    text-align: left;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    background: var(--surface);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    cursor: pointer;
+    font: inherit;
+    white-space: normal;
+    transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.analysis-task-card:not(:disabled):hover,
+.analysis-method-card:hover,
+.analysis-method-pill:hover {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 5%, var(--surface));
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+    transform: translateY(-1px);
+}
+
+.analysis-task-card.is-active,
+.analysis-task-card--active,
+.analysis-method-card.is-active,
+.analysis-method-card--active,
+.analysis-method-pill.is-active {
+    border-color: var(--primary);
+    border-width: 2px;
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.16);
+}
+
+.analysis-task-card.is-disabled,
+.analysis-task-card--disabled {
+    background: color-mix(in srgb, var(--muted) 9%, var(--surface));
+    color: var(--muted);
+    cursor: not-allowed;
+}
+
+.analysis-task-card.is-disabled:hover {
+    border-color: var(--border);
+    box-shadow: none;
+    transform: none;
+}
+
+.task-card-header,
+.method-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.analysis-method-pill {
+    flex: 1 1 210px;
+    max-width: 320px;
+}
+
+.task-card-main {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.task-title,
+.method-title {
+    display: block;
+    font-weight: 700;
+    font-size: 0.96rem;
+    line-height: 1.25;
+}
+
+.task-methods,
+.method-use {
+    display: block;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.35;
+}
+
+.task-description,
+.method-description {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.4;
+}
+
+.task-reason,
+.task-disabled-reason {
+    margin-top: auto;
+    color: var(--warning-text);
+    font-size: 0.8rem;
+    line-height: 1.35;
+}
+
+.task-badge,
+.method-badge {
+    white-space: nowrap;
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.task-badge.available,
+.task-badge--ok {
+    color: var(--success-text);
+    background: var(--success-bg);
+    border: 1px solid var(--success-border);
+}
+
+.task-badge.disabled,
+.task-badge--disabled {
+    color: var(--warning-text);
+    background: var(--warning-bg);
+    border: 1px solid var(--warning-border);
+}
+
+.task-badge.selected,
+.method-badge.selected {
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 13%, var(--surface));
+    border: 1px solid color-mix(in srgb, var(--primary) 42%, var(--border));
+}
+
+.analysis-selection-summary {
+    margin-top: 12px;
+    border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--primary) 7%, var(--surface));
+    color: var(--text);
+    font-weight: 650;
+    line-height: 1.4;
+}
+
+.analysis-run-summary {
+    margin: 12px 0;
+}
+
+.analysis-run-summary__main {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.analysis-run-summary__hint {
+    margin-top: 4px;
+    font-size: 0.86rem;
+}
+
+.analysis-run-actions {
+    margin-top: 12px;
+}
+
 button:disabled,
 .btn:disabled {
     cursor: not-allowed;

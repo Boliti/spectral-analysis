@@ -461,6 +461,8 @@ async def dataset_summary(request: Request, dataset_id: str, version: str = "raw
 @router.get("/dataset/{dataset_id}/spectra-preview")
 async def dataset_spectra_preview(request: Request, dataset_id: str, limit: str = "5", strategy: str = "balanced_by_class", version: str = "raw"):
     dataset = get_owned_dataset(dataset_id, current_analysis_user(request))
+    if strategy in {"balanced", "balanced_by_class"} and dataset.y is None:
+        strategy = "first_n"
     return {"status": "ok", **spectra_preview(dataset, limit=limit, strategy=strategy, version=version)}
 
 
@@ -644,6 +646,12 @@ async def train_model_from_dataset(
                 "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
                 "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
+                "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
+                "slit_width_um_values": imported.metadata.get("slit_width_um_values") or [],
+                "grating_lines_mm_values": imported.metadata.get("grating_lines_mm_values") or [],
+                "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
+                "accumulations_values": imported.metadata.get("accumulations_values") or [],
+                "power_mw_values": imported.metadata.get("power_mw_values") or [],
                 "preprocessing": imported.preprocessing_config if version == "processed" else {},
                 "user_id": user["user_id"],
                 "username": user["username"],
@@ -705,6 +713,12 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
                 "preprocessing_config": imported.preprocessing_config if version == "processed" else (payload.preprocessing_config or {}),
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
                 "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
+                "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
+                "slit_width_um_values": imported.metadata.get("slit_width_um_values") or [],
+                "grating_lines_mm_values": imported.metadata.get("grating_lines_mm_values") or [],
+                "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
+                "accumulations_values": imported.metadata.get("accumulations_values") or [],
+                "power_mw_values": imported.metadata.get("power_mw_values") or [],
                 "preprocessing": imported.preprocessing_config if version == "processed" else (payload.preprocessing_config or {}),
                 "run_id": run_id,
                 "user_id": user["user_id"],
@@ -779,6 +793,14 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
                     "n_features": summary.get("n_features"),
                     "import_config": imported.import_config(),
                     "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
+                    "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
+                    "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
+                    "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
+                    "slit_width_um_values": imported.metadata.get("slit_width_um_values") or [],
+                    "grating_lines_mm_values": imported.metadata.get("grating_lines_mm_values") or [],
+                    "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
+                    "accumulations_values": imported.metadata.get("accumulations_values") or [],
+                    "power_mw_values": imported.metadata.get("power_mw_values") or [],
                     "preprocessing": imported.preprocessing_config if version == "processed" else {},
                     "comparison_group": normalized_type,
                     "run_id": run_id,

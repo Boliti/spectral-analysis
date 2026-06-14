@@ -19,6 +19,7 @@ from sklearn.metrics import (
     precision_score,
     r2_score,
     recall_score,
+    silhouette_score,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -82,6 +83,21 @@ def _safe_clusters(configured: Optional[int], x: np.ndarray, y: Optional[np.ndar
         if unique >= 2:
             return min(unique, int(x.shape[0]))
     return min(2, int(x.shape[0]))
+
+
+def _cluster_quality_metrics(x_scaled: np.ndarray, labels: np.ndarray) -> Dict[str, Any]:
+    unique_labels = np.unique(labels)
+    if x_scaled.shape[0] < 3 or len(unique_labels) < 2 or len(unique_labels) >= x_scaled.shape[0]:
+        return {
+            "silhouette_score": None,
+            "warnings": [
+                "Silhouette score не рассчитан: нужно минимум 2 кластера и хотя бы один кластер с более чем одним объектом."
+            ],
+        }
+    try:
+        return {"silhouette_score": float(silhouette_score(x_scaled, labels)), "warnings": []}
+    except Exception as exc:
+        return {"silhouette_score": None, "warnings": [f"Silhouette score не рассчитан: {exc}"]}
 
 
 def _require_target(y: Optional[np.ndarray], message: str) -> np.ndarray:
@@ -364,12 +380,16 @@ class KMeansClusterModel(BaseAnalysisModel):
     def training_result(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> Dict[str, Any]:
         labels = self.predict(x)
         assert self.model is not None
+        quality = _cluster_quality_metrics(self.scaler.transform(x), labels)
         result: Dict[str, Any] = {
             "cluster_labels": labels.astype(int).tolist(),
             "n_clusters": int(self.model.n_clusters),
             "inertia": float(self.model.inertia_),
+            "silhouette_score": quality["silhouette_score"],
             "cluster_distribution": {str(k): int(v) for k, v in zip(*np.unique(labels, return_counts=True))},
         }
+        if quality["warnings"]:
+            result["warnings"] = quality["warnings"]
         if y is not None and len(np.unique(np.asarray(y, dtype=str))) >= 2:
             result["adjusted_rand_score"] = float(adjusted_rand_score(np.asarray(y, dtype=str), labels))
             result["normalized_mutual_info_score"] = float(normalized_mutual_info_score(np.asarray(y, dtype=str), labels))
@@ -409,12 +429,16 @@ class HCAClusterModel(BaseAnalysisModel):
 
     def training_result(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> Dict[str, Any]:
         labels = self.predict(x)
+        quality = _cluster_quality_metrics(self.scaler.transform(x), labels)
         result: Dict[str, Any] = {
             "cluster_labels": labels.astype(int).tolist(),
             "n_clusters": int(len(np.unique(labels))),
+            "silhouette_score": quality["silhouette_score"],
             "cluster_distribution": {str(k): int(v) for k, v in zip(*np.unique(labels, return_counts=True))},
             "linkage": self.config.linkage,
         }
+        if quality["warnings"]:
+            result["warnings"] = quality["warnings"]
         if y is not None and len(np.unique(np.asarray(y, dtype=str))) >= 2:
             result["adjusted_rand_score"] = float(adjusted_rand_score(np.asarray(y, dtype=str), labels))
             result["normalized_mutual_info_score"] = float(normalized_mutual_info_score(np.asarray(y, dtype=str), labels))
