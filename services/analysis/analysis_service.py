@@ -22,6 +22,8 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from services.analysis.model_manager import ModelManager
 from services.analysis.models import create_model
+from services.analysis.dataset_importer import SpectralDataset as ImportedSpectralDataset
+from services.analysis.dataset_importer import preprocess_matrix
 from services.analysis.spectrum_loader import SpectrumDataset, parse_spectrum_file, parse_target_values
 from services.analysis.visualization import class_count_plot, pca_plot, pls_regression_plot, residual_plot
 
@@ -153,18 +155,31 @@ class AnalysisService:
 
         timestamp_name = _timestamp_name()
         display_name = (model_name or "").strip() or f"{model.model_type}_{timestamp_name}"
+        axis = np.asarray(dataset.spectral_axis if dataset.spectral_axis is not None else np.arange(dataset.feature_count), dtype=float)
+        saved_params = model.get_params()
+        saved_classes = saved_params.get("classes") or result.get("classes", [])
         metadata = {
             "model_name": display_name,
             "display_name": display_name,
             "task_type": task_type,
             "input_shape": [int(dataset.sample_count), int(dataset.feature_count)],
             "feature_count": dataset.feature_count,
+            "expected_feature_count": dataset.feature_count,
             "sample_count": dataset.sample_count,
             "source_format": dataset.source_format,
             "file_format": dataset.file_format,
             "preprocessing": {},
-            "classes": result.get("classes", []),
-            "params": model.get_params(),
+            "classes": saved_classes,
+            "class_labels": saved_classes,
+            "class_mapping": {str(idx): str(label) for idx, label in enumerate(saved_classes)},
+            "target_column": None,
+            "spectral_axis": axis.astype(float).tolist(),
+            "axis": axis.astype(float).tolist(),
+            "axis_min": float(np.min(axis)) if axis.size else None,
+            "axis_max": float(np.max(axis)) if axis.size else None,
+            "axis_range": [float(np.min(axis)), float(np.max(axis))] if axis.size else [None, None],
+            "feature_order": [f"{float(value):.12g}" for value in axis],
+            "params": saved_params,
             "model_params": params,
             "target_type": self._target_kind(y),
             "validation_config": {
@@ -177,6 +192,8 @@ class AnalysisService:
         }
         if metadata_extra:
             metadata.update(metadata_extra)
+        metadata["target_column"] = metadata.get("target_name") or metadata.get("target_column")
+        metadata["preprocessing_applied"] = bool(metadata.get("used_processed_data"))
 
         saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata)
         plots = self._build_plots(model.model_type, result, phase="training", dataset=dataset)
@@ -683,27 +700,169 @@ class AnalysisService:
         limitations.append("Метрики являются вычислительной оценкой качества модели и требуют проверки на независимых данных.")
         return limitations
 
+    @staticmethod
+    def _metadata_axis(metadata: Dict[str, Any]) -> Optional[np.ndarray]:
+        raw_axis = metadata.get("spectral_axis") or metadata.get("axis")
+        if not raw_axis:
+            return None
+        axis = np.asarray(raw_axis, dtype=float)
+        return axis if axis.ndim == 1 and axis.size else None
+
+    @staticmethod
+    def _raw_metadata_axis(metadata: Dict[str, Any]) -> Optional[np.ndarray]:
+        raw_axis = metadata.get("raw_spectral_axis")
+        if not raw_axis:
+            return None
+        axis = np.asarray(raw_axis, dtype=float)
+        return axis if axis.ndim == 1 and axis.size else None
+
+    @staticmethod
+    def _axis_close(left: np.ndarray, right: np.ndarray) -> bool:
+        return left.shape == right.shape and bool(np.allclose(left, right, rtol=1e-6, atol=1e-8))
+
+    @staticmethod
+    def _as_imported_dataset(dataset: SpectrumDataset) -> ImportedSpectralDataset:
+        axis = np.asarray(dataset.spectral_axis if dataset.spectral_axis is not None else np.arange(dataset.feature_count), dtype=float)
+        return ImportedSpectralDataset(
+            X=np.asarray(dataset.x, dtype=float),
+            axis=axis,
+            sample_ids=list(dataset.sample_names),
+            y=None,
+            target_name=None,
+            class_names=None,
+            metadata=dict(dataset.metadata or {}),
+            source_layout=dataset.source_format,
+            source_files=[dataset.filename] if dataset.filename else [],
+        )
+
+    def _prepare_inference_dataset(self, dataset: SpectrumDataset, metadata: Dict[str, Any]) -> tuple[SpectrumDataset, Dict[str, Any], List[str]]:
+        warnings: List[str] = []
+        input_axis = np.asarray(dataset.spectral_axis if dataset.spectral_axis is not None else np.arange(dataset.feature_count), dtype=float)
+        X = np.asarray(dataset.x, dtype=float)
+        working_axis = input_axis
+        preprocessing_config = metadata.get("preprocessing_config") or metadata.get("preprocessing") or {}
+        preprocessing_applied = False
+        raw_axis_interpolated = False
+        if metadata.get("used_processed_data") and preprocessing_config:
+            raw_axis = self._raw_metadata_axis(metadata)
+            if raw_axis is not None and not self._axis_close(working_axis, raw_axis):
+                source_min = float(np.nanmin(working_axis))
+                source_max = float(np.nanmax(working_axis))
+                raw_min = float(np.nanmin(raw_axis))
+                raw_max = float(np.nanmax(raw_axis))
+                if source_min > raw_min or source_max < raw_max:
+                    warnings.append("Диапазон оси входного спектра не полностью покрывает raw-ось обучающего датасета; края будут заполнены ближайшими значениями.")
+                X = np.vstack([np.interp(raw_axis, working_axis, row, left=float(row[0]), right=float(row[-1])) for row in X])
+                working_axis = raw_axis
+                raw_axis_interpolated = True
+                warnings.append("Входной спектр интерполирован на raw-ось обучающего датасета перед предобработкой.")
+            preprocessing_dataset = ImportedSpectralDataset(
+                X=X,
+                axis=working_axis,
+                sample_ids=list(dataset.sample_names),
+                y=None,
+                target_name=None,
+                class_names=None,
+                metadata=dict(dataset.metadata or {}),
+                source_layout=dataset.source_format,
+                source_files=[dataset.filename] if dataset.filename else [],
+            )
+            processed = preprocess_matrix(preprocessing_dataset, preprocessing_config)
+            X = np.asarray(processed["X"], dtype=float)
+            working_axis = np.asarray(processed["axis"], dtype=float)
+            preprocessing_applied = True
+            warnings.extend([str(item) for item in processed.get("warnings", []) if item])
+
+        expected_axis = self._metadata_axis(metadata)
+        interpolated = False
+        range_warning = False
+        input_was_single_column = bool((dataset.metadata or {}).get("single_column_intensity_only"))
+        if input_was_single_column and expected_axis is not None:
+            expected_features_for_axis = int(metadata.get("expected_feature_count") or metadata.get("feature_count") or expected_axis.size)
+            if X.shape[1] == expected_features_for_axis:
+                working_axis = expected_axis
+                warnings.append("TXT-файл содержит только интенсивности без спектральной оси; использована spectral_axis сохранённой модели.")
+            else:
+                warnings.append(
+                    f"TXT-файл содержит только интенсивности без спектральной оси; число точек ({X.shape[1]}) не совпадает с моделью ({expected_features_for_axis})."
+                )
+        if expected_axis is not None and not self._axis_close(working_axis, expected_axis):
+            source_min = float(np.nanmin(working_axis))
+            source_max = float(np.nanmax(working_axis))
+            expected_min = float(np.nanmin(expected_axis))
+            expected_max = float(np.nanmax(expected_axis))
+            if source_min > expected_min or source_max < expected_max:
+                range_warning = True
+                warnings.append("Диапазон оси входного спектра не полностью покрывает ось модели; края будут заполнены ближайшими значениями.")
+            X = np.vstack([np.interp(expected_axis, working_axis, row, left=float(row[0]), right=float(row[-1])) for row in X])
+            working_axis = expected_axis
+            interpolated = True
+            warnings.append("Входной спектр интерполирован на спектральную ось сохранённой модели.")
+
+        expected_features = int(metadata.get("expected_feature_count") or metadata.get("feature_count") or 0)
+        if expected_features and X.shape[1] != expected_features:
+            raise ValueError(
+                f"Число признаков после подготовки входа ({X.shape[1]}) не совпадает с ожидаемым числом признаков модели ({expected_features}). "
+                "Проверьте формат файла, спектральную ось и настройки предобработки."
+            )
+
+        prepared = SpectrumDataset(
+            x=X,
+            spectral_axis=working_axis,
+            sample_names=list(dataset.sample_names),
+            source_format=dataset.source_format,
+            filename=dataset.filename,
+            file_format=dataset.file_format,
+            metadata={**dict(dataset.metadata or {}), "prepared_for_model": metadata.get("model_id")},
+        )
+        report = {
+            "raw_feature_count": int(dataset.feature_count),
+            "input_feature_count": int(dataset.feature_count),
+            "prepared_feature_count": int(prepared.feature_count),
+            "expected_feature_count": expected_features or int(prepared.feature_count),
+            "axis_min_input": float(np.nanmin(input_axis)) if input_axis.size else None,
+            "axis_max_input": float(np.nanmax(input_axis)) if input_axis.size else None,
+            "input_axis_min": float(np.nanmin(input_axis)) if input_axis.size else None,
+            "input_axis_max": float(np.nanmax(input_axis)) if input_axis.size else None,
+            "axis_min_model": float(np.nanmin(expected_axis)) if expected_axis is not None and expected_axis.size else None,
+            "axis_max_model": float(np.nanmax(expected_axis)) if expected_axis is not None and expected_axis.size else None,
+            "prepared_axis_min": float(np.nanmin(working_axis)) if working_axis.size else None,
+            "prepared_axis_max": float(np.nanmax(working_axis)) if working_axis.size else None,
+            "model_axis_min": float(np.nanmin(expected_axis)) if expected_axis is not None and expected_axis.size else None,
+            "model_axis_max": float(np.nanmax(expected_axis)) if expected_axis is not None and expected_axis.size else None,
+            "interpolated_to_model_axis": interpolated,
+            "interpolated": interpolated,
+            "interpolated_to_raw_training_axis": raw_axis_interpolated,
+            "range_warning": range_warning,
+            "preprocessing_applied": preprocessing_applied,
+            "preprocessing_config": preprocessing_config if preprocessing_applied else {},
+            "warnings": list(warnings),
+        }
+        return prepared, report, warnings
+
     def infer(self, model_type: str, model_id: str, dataset: SpectrumDataset) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
-        expected_features = int(metadata.get("feature_count") or 0)
-        if expected_features and dataset.feature_count != expected_features:
+        prepared, report, warnings = self._prepare_inference_dataset(dataset, metadata)
+        expected_features = int(metadata.get("expected_feature_count") or metadata.get("feature_count") or 0)
+        if expected_features and prepared.feature_count != expected_features:
             raise ValueError(
                 f"Количество признаков во входном файле ({dataset.feature_count}) не совпадает "
                 f"с обученной моделью ({expected_features})."
             )
-        result = model.inference_result(dataset.x)
+        result = model.inference_result(prepared.x)
         plot = self._build_plot(metadata.get("model_type", model_type), result, phase="inference")
-        predictions = self._prediction_rows(result, dataset.sample_names)
+        predictions = self._prediction_rows(result, prepared.sample_names)
         return {
             "status": "success",
             "model_id": metadata.get("model_id", model_id),
             "model_type": metadata.get("model_type", model_type),
             "model_metadata": metadata,
+            "inference_report": report,
             "result": result,
             "predictions": predictions,
             "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
-            "warnings": [],
+            "warnings": warnings,
         }
 
     def infer_many(
@@ -713,21 +872,27 @@ class AnalysisService:
         datasets: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
-        expected_features = int(metadata.get("feature_count") or 0)
+        expected_features = int(metadata.get("expected_feature_count") or metadata.get("feature_count") or 0)
         all_results: List[Dict[str, Any]] = []
         all_predicted_classes: List[str] = []
         all_predictions: List[float] = []
+        reports: List[Dict[str, Any]] = []
+        warnings: List[str] = []
 
         for item in datasets:
             filename = item["filename"]
             dataset: SpectrumDataset = item["dataset"]
-            if expected_features and dataset.feature_count != expected_features:
+            prepared, report, item_warnings = self._prepare_inference_dataset(dataset, metadata)
+            report["filename"] = filename
+            reports.append(report)
+            warnings.extend([f"{filename}: {warning}" for warning in item_warnings])
+            if expected_features and prepared.feature_count != expected_features:
                 raise ValueError(
                     f"Файл {filename}: число признаков ({dataset.feature_count}) не совпадает "
                     f"с обученной моделью ({expected_features})."
                 )
-            result = model.inference_result(dataset.x)
-            row = {"filename": filename, "result": result}
+            result = model.inference_result(prepared.x)
+            row = {"filename": filename, "result": result, "inference_report": report}
             all_results.append(row)
 
             if "predicted_classes" in result:
@@ -752,6 +917,10 @@ class AnalysisService:
             for row in rows:
                 row["source_file"] = filename
             prediction_rows.extend(rows)
+        if len(prediction_rows) > 1:
+            unique_predictions = {str(row.get("predicted")) for row in prediction_rows}
+            if len(unique_predictions) == 1:
+                warnings.append("Все файлы отнесены к одному классу. Проверьте ось спектра, предобработку и применимость модели.")
         return {
             "status": "success",
             "model_id": metadata.get("model_id", model_id),
@@ -759,10 +928,11 @@ class AnalysisService:
             "model_metadata": metadata,
             "batch_results": all_results,
             "aggregate_result": aggregate_result,
+            "inference_reports": reports,
             "predictions": prediction_rows,
             "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
-            "warnings": [],
+            "warnings": warnings,
         }
 
     @staticmethod
@@ -779,11 +949,23 @@ class AnalysisService:
             predicted = value
             if isinstance(value, list):
                 predicted = ";".join(str(v) for v in value)
+            confidence = None
+            if isinstance(result.get("confidence"), list) and idx < len(result["confidence"]):
+                confidence = result["confidence"][idx]
+            probabilities = {}
+            if isinstance(result.get("probabilities"), list) and idx < len(result["probabilities"]):
+                probabilities = result["probabilities"][idx]
+            decision_score = None
+            if isinstance(result.get("decision_score"), list) and idx < len(result["decision_score"]):
+                decision_score = result["decision_score"][idx]
             rows.append({
                 "sample_id": sample_ids[idx] if sample_ids and idx < len(sample_ids) else f"sample_{idx + 1}",
                 "predicted": predicted,
-                "confidence": None,
-                "probabilities": {},
+                "confidence": confidence if confidence is not None else "вероятность недоступна",
+                "confidence_kind": result.get("confidence_kind") or "unavailable",
+                "probability_available": bool(result.get("probability_available")),
+                "probabilities": probabilities,
+                "decision_score": decision_score,
             })
         return rows
 

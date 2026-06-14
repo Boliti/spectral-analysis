@@ -1518,6 +1518,48 @@ body {
     overflow: auto;
 }
 
+#text-result {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: Consolas, "Liberation Mono", Menlo, monospace;
+    line-height: 1.45;
+}
+
+.json-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin: 8px 0;
+}
+
+.selected-file-list {
+    margin-top: 6px;
+    font-family: Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.selected-file-list--all {
+    max-height: 180px;
+    overflow: auto;
+}
+
+.btn-mini {
+    margin-top: 8px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.preprocessing-inline-params {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.preprocessing-inline-params label {
+    min-width: 0;
+}
+
 .dataset-summary-grid,
 .metadata-grid,
 .metrics-grid {

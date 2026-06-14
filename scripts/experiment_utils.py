@@ -23,6 +23,11 @@ from sklearn.tree import DecisionTreeClassifier
 
 
 SERVICE_COLUMNS = {"sample_id", "sample", "id", "source_file", "source_sheet", "filename", "file_name"}
+WORKING_DATASET_MESSAGE = (
+    "Для этого скрипта нужен рабочий датасет формата: одна строка = один спектр, "
+    "target = отдельный столбец. Сначала импортируйте Excel через интерфейс и "
+    "скачайте правильный CSV/XLSX"
+)
 
 
 class PLSDAEstimator(BaseEstimator, ClassifierMixin):
@@ -63,9 +68,14 @@ def read_table(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         try:
-            return pd.read_excel(path)
+            sheets = pd.read_excel(path, sheet_name=None)
         except ImportError as exc:
             raise SystemExit("Excel input requires openpyxl. Install project requirements with Excel support.") from exc
+        if not sheets:
+            raise SystemExit(WORKING_DATASET_MESSAGE)
+        if len(sheets) > 1:
+            raise SystemExit(WORKING_DATASET_MESSAGE)
+        return next(iter(sheets.values()))
     if suffix == ".csv":
         return pd.read_csv(path)
     raise SystemExit(f"Unsupported dataset format: {suffix}. Use CSV, XLSX or XLS.")
@@ -85,7 +95,7 @@ def split_features_target(df: pd.DataFrame, target: str = "target") -> Tuple[np.
         if numeric.notna().sum() >= max(1, int(len(df) * 0.8)):
             feature_cols.append(col)
     if not feature_cols:
-        raise SystemExit("No numeric spectral feature columns were found.")
+        raise SystemExit(WORKING_DATASET_MESSAGE)
     X_frame = df[feature_cols].apply(pd.to_numeric, errors="coerce")
     X_frame = X_frame.fillna(X_frame.median(numeric_only=True)).fillna(0.0)
     return X_frame.to_numpy(dtype=float), y, feature_cols

@@ -935,7 +935,7 @@ class ExcelRowSpectraParser:
         )
 
 
-def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, np.ndarray, bool]:
+def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, np.ndarray, bool, bool]:
     text = None
     for encoding in ("utf-8-sig", "utf-8", "cp1251", "latin-1"):
         try:
@@ -946,6 +946,7 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
     if text is None:
         raise DatasetImportError(f"Не удалось декодировать файл {filename}.")
     rows: List[Tuple[float, float]] = []
+    intensity_only: List[float] = []
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", "//")):
@@ -953,11 +954,20 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
         normalized = stripped.replace(",", ".").replace(";", " ").replace("\t", " ")
         parts = [part for part in normalized.split() if part]
         if len(parts) < 2:
+            if len(parts) == 1:
+                try:
+                    intensity_only.append(float(parts[0]))
+                except ValueError:
+                    pass
             continue
         try:
             rows.append((float(parts[0]), float(parts[1])))
         except ValueError:
             continue
+    if len(rows) < 2 and len(intensity_only) >= 2:
+        intensity = np.asarray(intensity_only, dtype=float)
+        axis = np.arange(intensity.size, dtype=float)
+        return axis, intensity, False, True
     if len(rows) < 2:
         raise DatasetImportError(f"Файл {filename} не содержит минимум две числовые пары x/intensity.")
     arr = np.asarray(rows, dtype=float)
@@ -965,7 +975,7 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
     intensity = arr[:, 1]
     reverse_axis = bool(axis[0] > axis[-1])
     order = np.argsort(axis)
-    return axis[order], intensity[order], reverse_axis
+    return axis[order], intensity[order], reverse_axis, False
 
 
 def _target_from_path(name: str, source: str, manual_target: Optional[str], filename_regex: Optional[str] = None) -> Optional[str]:
@@ -992,7 +1002,7 @@ def _target_from_path(name: str, source: str, manual_target: Optional[str], file
 def _metadata_from_spectrum_filename(name: str) -> Dict[str, Any]:
     filename = Path(name).name
     stem = Path(filename).stem
-    text = filename.lower().replace(",", ".")
+    text = str(name).lower().replace(",", ".")
     sample_name = re.sub(r"[_\s-]*\d+(?:\.\d+)?\s*mw(?:t)?", "", stem, flags=re.IGNORECASE)
     sample_name = re.sub(r"[_\s-]*\d+(?:\.\d+)?\s*sec", "", sample_name, flags=re.IGNORECASE)
     sample_name = re.sub(r"[_\s-]*x\d+", "", sample_name, flags=re.IGNORECASE)
@@ -1005,7 +1015,7 @@ def _metadata_from_spectrum_filename(name: str) -> Dict[str, Any]:
         "source_file": name,
     }
     slit = re.search(r"slit[_\s-]*(\d+(?:\.\d+)?)\s*um", text)
-    grating = re.search(r"(\d+)[_\s-]*l[_\s-]*mm", text)
+    grating = re.search(r"grating[_\s-]*(\d{3,4})", text) or re.search(r"(\d{3,4})[_\s-]*l[/_\s-]*mm", text)
     exposure = re.search(r"(\d+(?:\.\d+)?)\s*sec", text)
     accumulations = re.search(r"x(\d+)", text)
     power = re.search(r"(\d+(?:\.\d+)?)\s*mw(?:t)?", text)
@@ -1096,15 +1106,17 @@ class TxtFolderSpectraParser:
         target_source = config.get("target_source", "none")
         manual_target = config.get("manual_target")
         filename_regex = config.get("filename_regex") or config.get("target_regex")
-        spectra: List[Tuple[str, Optional[str], np.ndarray, np.ndarray, bool]] = []
+        spectra: List[Tuple[str, Optional[str], np.ndarray, np.ndarray, bool, bool]] = []
         sample_metadata: List[Dict[str, Any]] = []
         for name, content in entries:
-            axis, intensity, reversed_axis = _parse_two_column_text(content, name)
+            axis, intensity, reversed_axis, intensity_only = _parse_two_column_text(content, name)
             metadata = _metadata_from_spectrum_filename(name)
+            if intensity_only:
+                metadata["intensity_only"] = True
             target = _target_from_path(name, target_source, manual_target, filename_regex)
             if target is not None:
                 metadata["target"] = target
-            spectra.append((name, target, axis, intensity, reversed_axis))
+            spectra.append((name, target, axis, intensity, reversed_axis, intensity_only))
             sample_metadata.append(metadata)
 
         interpolation = config.get("interpolation") or {}
@@ -1117,11 +1129,11 @@ class TxtFolderSpectraParser:
                 manual_min=interpolation.get("grid_min"),
                 manual_max=interpolation.get("grid_max"),
             )
-            X = np.vstack([np.interp(grid, axis, intensity) for _name, _target, axis, intensity, _rev in spectra])
+            X = np.vstack([np.interp(grid, axis, intensity) for _name, _target, axis, intensity, _rev, _one_col in spectra])
             axis_out = grid
         else:
             first_axis = spectra[0][2]
-            for name, _target, axis, _intensity, _rev in spectra[1:]:
+            for name, _target, axis, _intensity, _rev, _one_col in spectra[1:]:
                 if first_axis.shape != axis.shape or not np.allclose(first_axis, axis):
                     raise DatasetImportError(
                         f"Файл {name} имеет другую спектральную сетку. Включите interpolation.enabled=true."
@@ -1129,7 +1141,7 @@ class TxtFolderSpectraParser:
             X = np.vstack([item[3] for item in spectra])
             axis_out = first_axis
 
-        y = [target for _name, target, _axis, _intensity, _rev in spectra if target is not None]
+        y = [target for _name, target, _axis, _intensity, _rev, _one_col in spectra if target is not None]
         y_out = y if len(y) == len(spectra) else None
         target_warning: Optional[str] = None
         if y_out:
@@ -1154,7 +1166,9 @@ class TxtFolderSpectraParser:
             metadata={
                 "import_config": config,
                 "nested_archives": nested_archives,
-                "reverse_axis_files": [name for name, _target, _axis, _intensity, rev in spectra if rev],
+                "reverse_axis_files": [name for name, _target, _axis, _intensity, rev, _one_col in spectra if rev],
+                "single_column_intensity_files": [name for name, _target, _axis, _intensity, _rev, one_col in spectra if one_col],
+                "single_column_intensity_only": any(one_col for _name, _target, _axis, _intensity, _rev, one_col in spectra),
                 "interpolation": interpolation,
                 "slit_width_um_values": slit_values,
                 "grating_lines_mm_values": grating_values,

@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-from experiment_utils import classification_models, fail_missing_input, read_table, safe_train_test_split, save_csv, split_features_target
+from experiment_utils import WORKING_DATASET_MESSAGE, classification_models, fail_missing_input, read_table, safe_train_test_split, save_csv, split_features_target
 
 
 def measure(operation: str, model: str, dataset_name: str, n_samples: int, n_features: int, fn: Callable[[], Any]) -> Dict[str, Any]:
@@ -76,7 +76,7 @@ def main() -> None:
                 "time_seconds": None,
                 "inference_ms_per_spectrum": None,
                 "peak_memory_mb": None,
-                "warning": f"Target column '{args.target}' was not found; classification benchmark skipped.",
+                "warning": WORKING_DATASET_MESSAGE,
             }
         )
     else:

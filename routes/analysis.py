@@ -22,6 +22,7 @@ from services.analysis.analysis_service import AnalysisService
 from services.analysis.dataset_importer import (
     DatasetImportError,
     SpectralDataset,
+    UploadedFileData,
     apply_preprocessing,
     dataset_store,
     import_dataset,
@@ -57,6 +58,23 @@ logger = logging.getLogger(__name__)
 
 def _safe_user_segment(value: Any) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "unknown"))
+
+
+def dataset_slice(dataset: Any, index: int):
+    metadata = dict(dataset.metadata or {})
+    sample_metadata = metadata.get("sample_metadata") or []
+    if isinstance(sample_metadata, list) and index < len(sample_metadata) and isinstance(sample_metadata[index], dict):
+        metadata["sample_metadata"] = [sample_metadata[index]]
+        metadata["single_column_intensity_only"] = bool(sample_metadata[index].get("intensity_only"))
+    return type(dataset)(
+        x=dataset.x[index : index + 1],
+        spectral_axis=dataset.spectral_axis,
+        sample_names=[dataset.sample_names[index] if index < len(dataset.sample_names) else f"sample_{index + 1}"],
+        source_format=dataset.source_format,
+        filename=dataset.filename,
+        file_format=dataset.file_format,
+        metadata=metadata,
+    )
 
 
 def current_analysis_user(request: Request) -> Dict[str, Any]:
@@ -642,6 +660,7 @@ async def train_model_from_dataset(
                 "axis_range": [imported.summary(version=version).get("axis_min"), imported.summary(version=version).get("axis_max")],
                 "axis_min": imported.summary(version=version).get("axis_min"),
                 "axis_max": imported.summary(version=version).get("axis_max"),
+                "raw_spectral_axis": imported.axis.astype(float).tolist(),
                 "import_config": imported.import_config(),
                 "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
@@ -707,10 +726,11 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
                 "axis_range": [summary.get("axis_min"), summary.get("axis_max")],
                 "axis_min": summary.get("axis_min"),
                 "axis_max": summary.get("axis_max"),
+                "raw_spectral_axis": imported.axis.astype(float).tolist(),
                 "n_samples": summary.get("n_samples"),
                 "n_features": summary.get("n_features"),
                 "import_config": imported.import_config(),
-                "preprocessing_config": imported.preprocessing_config if version == "processed" else (payload.preprocessing_config or {}),
+                "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
                 "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
                 "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
@@ -719,7 +739,7 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
                 "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
                 "accumulations_values": imported.metadata.get("accumulations_values") or [],
                 "power_mw_values": imported.metadata.get("power_mw_values") or [],
-                "preprocessing": imported.preprocessing_config if version == "processed" else (payload.preprocessing_config or {}),
+                "preprocessing": imported.preprocessing_config if version == "processed" else {},
                 "run_id": run_id,
                 "user_id": user["user_id"],
                 "username": user["username"],
@@ -789,6 +809,7 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
                     "axis_range": [summary.get("axis_min"), summary.get("axis_max")],
                     "axis_min": summary.get("axis_min"),
                     "axis_max": summary.get("axis_max"),
+                    "raw_spectral_axis": imported.axis.astype(float).tolist(),
                     "n_samples": summary.get("n_samples"),
                     "n_features": summary.get("n_features"),
                     "import_config": imported.import_config(),
@@ -1262,9 +1283,17 @@ async def infer_model(
     try:
         service = user_analysis_service(current_analysis_user(request))
         raw = await file.read()
-        dataset = service.parse_file(raw=raw, filename=file.filename or "")
+        imported = import_dataset(
+            [UploadedFileData(filename=file.filename or "spectrum.txt", content=raw)],
+            {
+                "layout": "txt_folder",
+                "target_source": "none",
+                "interpolation": {"enabled": True, "grid_mode": "first_axis", "step": "auto"},
+            },
+        )
+        dataset = imported.to_analysis_dataset(version="raw")
         return {"status": "ok", **service.infer(model_type=model_type, model_id=model_id, dataset=dataset)}
-    except SpectrumValidationError as exc:
+    except (SpectrumValidationError, DatasetImportError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1287,14 +1316,27 @@ async def infer_batch(
         if not files:
             raise HTTPException(status_code=400, detail="Не переданы файлы для инференса")
 
-        datasets = []
+        uploaded: List[UploadedFileData] = []
         for file in files:
             raw = await file.read()
-            dataset = service.parse_file(raw=raw, filename=file.filename or "")
-            datasets.append({"filename": file.filename or "unknown", "dataset": dataset})
+            uploaded.append(UploadedFileData(filename=file.filename or "unknown.txt", content=raw))
+        imported = import_dataset(
+            uploaded,
+            {
+                "layout": "txt_folder",
+                "target_source": "none",
+                "interpolation": {"enabled": True, "grid_mode": "first_axis", "step": "auto"},
+            },
+        )
+        dataset = imported.to_analysis_dataset(version="raw")
+        source_items = imported.source_items or [item.filename for item in uploaded]
+        datasets = [
+            {"filename": source_items[idx] if idx < len(source_items) else f"sample_{idx + 1}", "dataset": dataset_slice(dataset, idx)}
+            for idx in range(dataset.sample_count)
+        ]
 
         return {"status": "ok", **service.infer_many(model_type=model_type, model_id=model_id, datasets=datasets)}
-    except SpectrumValidationError as exc:
+    except (SpectrumValidationError, DatasetImportError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

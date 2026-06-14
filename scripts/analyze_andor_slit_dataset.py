@@ -30,7 +30,7 @@ def iter_asc_files(input_path: Path) -> Iterable[Tuple[str, bytes]]:
         with zipfile.ZipFile(input_path) as archive:
             for name in sorted(archive.namelist()):
                 if name.lower().endswith(".asc") and not name.endswith("/"):
-                    yield Path(name).name, archive.read(name)
+                    yield name, archive.read(name)
     elif input_path.suffix.lower() == ".asc":
         yield input_path.name, input_path.read_bytes()
     else:
@@ -53,6 +53,7 @@ def parse_filename_params(file_name: str) -> Dict[str, Any]:
             break
     grating_patterns = [
         r"grating[_\s-]*(\d{3,4})",
+        r"(\d{3,4})[_\s-]*l[/_\s-]*mm",
         r"(\d{3,4})\s*(?:l/mm|lines|штр|g/mm)",
         r"реш[её]тк[аи][_\s-]*(\d{3,4})",
     ]

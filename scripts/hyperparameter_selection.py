@@ -15,7 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR, SVC
 from sklearn.tree import DecisionTreeClassifier
 
-from experiment_utils import PLSDAEstimator, fail_missing_input, param_grid, read_table, save_csv, split_features_target, stratify_if_possible
+from experiment_utils import PLSDAEstimator, WORKING_DATASET_MESSAGE, fail_missing_input, param_grid, read_table, save_csv, split_features_target, stratify_if_possible
 
 
 def infer_task(y: np.ndarray | None, requested: str) -> str:
@@ -89,7 +89,7 @@ def main() -> None:
 
     if task == "classification":
         if y is None:
-            raise SystemExit(f"Target column '{args.target}' is required for classification.")
+            raise SystemExit(WORKING_DATASET_MESSAGE)
         y = np.asarray(y, dtype=str)
         max_components = list(range(1, min(10, X.shape[0] - 1, X.shape[1], len(np.unique(y))) + 1))
         rows.append(run_grid("PLS-DA", PLSDAEstimator(), {"n_components": max_components}, X, y, task, args.cv_folds))
@@ -98,7 +98,7 @@ def main() -> None:
         rows.append(run_grid("Decision Tree", DecisionTreeClassifier(random_state=42), {"max_depth": [None, 3, 5, 10]}, X, y, task, args.cv_folds))
     elif task == "regression":
         if y is None:
-            raise SystemExit(f"Target column '{args.target}' is required for regression.")
+            raise SystemExit(WORKING_DATASET_MESSAGE)
         y_num = np.asarray(y, dtype=float)
         max_components = list(range(1, min(10, X.shape[0] - 1, X.shape[1]) + 1))
         rows.append(run_grid("PLS Regression", Pipeline([("scaler", StandardScaler()), ("pls", PLSRegression())]), {"pls__n_components": max_components}, X, y_num, task, args.cv_folds))

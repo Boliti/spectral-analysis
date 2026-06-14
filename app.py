@@ -44,7 +44,7 @@ try:
     client = get_openrouter_client()
     logger.info("OpenRouter client initialized")
 except RuntimeError as exc:
-    logger.error("Failed to initialize OpenRouter client: %s", exc)
+    logger.warning("%s", exc)
     client = None
 
 # Импорты из data_processing (обработка возможных ошибок)
@@ -1086,7 +1086,6 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="localhost", port=port)
     
-
 
 
 

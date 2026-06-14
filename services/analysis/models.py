@@ -239,6 +239,12 @@ class PLSDAClassifier(BaseAnalysisModel):
         y_scores = self.model.predict(x_scaled)
         return np.argmax(y_scores, axis=1)
 
+    def decision_scores(self, x: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            raise ValueError("PLS-DA model is not fitted")
+        x_scaled = self.scaler.transform(x)
+        return np.asarray(self.model.predict(x_scaled), dtype=float)
+
     def predict(self, x: np.ndarray) -> np.ndarray:
         encoded = self._predict_encoded(x)
         return self.encoder.inverse_transform(encoded)
@@ -253,10 +259,23 @@ class PLSDAClassifier(BaseAnalysisModel):
         }
 
     def inference_result(self, x: np.ndarray) -> Dict[str, Any]:
-        y_pred = self.predict(x)
+        scores = self.decision_scores(x)
+        encoded = np.argmax(scores, axis=1)
+        y_pred = self.encoder.inverse_transform(encoded)
+        max_scores = np.max(scores, axis=1)
+        score_table = [
+            {str(cls): float(row[idx]) for idx, cls in enumerate(self.encoder.classes_)}
+            for row in scores
+        ]
         return {
             "predicted_classes": y_pred.tolist(),
             "classes": self.encoder.classes_.tolist(),
+            "decision_scores": score_table,
+            "decision_score": max_scores.astype(float).tolist(),
+            "confidence": [f"score={float(value):.4g}; вероятность недоступна" for value in max_scores],
+            "confidence": [f"score={float(value):.4g}; вероятность недоступна для данной модели" for value in max_scores],
+            "confidence_kind": "decision_score",
+            "probability_available": False,
         }
 
     def get_params(self) -> Dict[str, Any]:
@@ -304,7 +323,33 @@ class SklearnClassifierModel(BaseAnalysisModel):
 
     def inference_result(self, x: np.ndarray) -> Dict[str, Any]:
         y_pred = self.predict(x)
-        return {"predicted_classes": y_pred.tolist(), "classes": sorted(np.unique(y_pred).tolist())}
+        classes = list(getattr(self.model, "classes_", []))
+        estimator = self.model
+        if isinstance(estimator, Pipeline):
+            classes = list(getattr(estimator.steps[-1][1], "classes_", classes))
+        result: Dict[str, Any] = {"predicted_classes": y_pred.tolist(), "classes": [str(v) for v in classes] or sorted(np.unique(y_pred).tolist())}
+        if hasattr(self.model, "predict_proba"):
+            proba = np.asarray(self.model.predict_proba(x), dtype=float)
+            max_proba = np.max(proba, axis=1)
+            result["probabilities"] = [
+                {str(cls): float(row[idx]) for idx, cls in enumerate(result["classes"])}
+                for row in proba
+            ]
+            result["confidence"] = max_proba.astype(float).tolist()
+            result["confidence_kind"] = "probability"
+            result["probability_available"] = True
+        elif hasattr(self.model, "decision_function"):
+            scores = np.asarray(self.model.decision_function(x), dtype=float)
+            score_values = scores if scores.ndim == 1 else np.max(scores, axis=1)
+            result["decision_score"] = np.asarray(score_values, dtype=float).tolist()
+            result["confidence"] = [f"score={float(value):.4g}; вероятность недоступна" for value in score_values]
+            result["confidence_kind"] = "decision_score"
+            result["probability_available"] = False
+        else:
+            result["confidence"] = ["вероятность недоступна"] * len(y_pred)
+            result["confidence_kind"] = "unavailable"
+            result["probability_available"] = False
+        return result
 
     def get_params(self) -> Dict[str, Any]:
         return dict(self.config.__dict__)

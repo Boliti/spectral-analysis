@@ -294,8 +294,31 @@ function themedLayout(layout = {}) {
 
 const plotConfig = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] };
 
+function ensurePlotElement(id) {
+    if (typeof id !== "string") return id;
+    let element = document.getElementById(id);
+    if (element) return element;
+    const plotsPanel = document.querySelector('[data-result-panel="plots"]') || resultsSection || document.body;
+    if (id === "plot") {
+        element = document.createElement("div");
+        element.id = "plot";
+        element.className = "plot-box";
+        plotsPanel.appendChild(element);
+        return element;
+    }
+    if (id.startsWith("result-plot-")) {
+        const plotBox = ensurePlotElement("plot");
+        element = document.createElement("div");
+        element.id = id;
+        element.className = "plot-frame";
+        plotBox.appendChild(element);
+        return element;
+    }
+    return null;
+}
+
 function newPlot(id, data, layout = {}, config = {}) {
-    const element = typeof id === "string" ? document.getElementById(id) : id;
+    const element = typeof id === "string" ? ensurePlotElement(id) : id;
     if (!element) {
         console.warn(`Контейнер графика не найден: ${id}`);
         return Promise.resolve(null);
@@ -330,7 +353,11 @@ function updateAllAnalysisPlotsTheme() {
     const theme = getPlotlyTheme();
     plotRegistry.forEach((id) => {
         const el = document.getElementById(id);
-        if (!el || !el.data) return;
+        if (!el) {
+            plotRegistry.delete(id);
+            return;
+        }
+        if (!el.data) return;
         const relayout = {
             paper_bgcolor: theme.paper_bgcolor,
             plot_bgcolor: theme.plot_bgcolor,
@@ -349,7 +376,12 @@ function updateAllAnalysisPlotsTheme() {
             "yaxis2.zerolinecolor": theme.yaxis.zerolinecolor,
             "yaxis2.linecolor": theme.yaxis.linecolor,
         };
-        Plotly.relayout(id, relayout);
+        try {
+            const update = Plotly.relayout(el, relayout);
+            if (update?.catch) update.catch(() => plotRegistry.delete(id));
+        } catch {
+            plotRegistry.delete(id);
+        }
     });
 }
 
@@ -769,6 +801,19 @@ function setLoadedModelBadge() {
 function updateInferFilesHint() {
     if (!inferFileInput || !inferFilesHint) return;
     const files = Array.from(inferFileInput.files || []);
+    if (files.length > 0) {
+        const firstNames = files.slice(0, 5).map((f) => f.name);
+        const allNames = files.map((f) => f.name);
+        inferFilesHint.innerHTML = `
+            <div>Выбрано файлов: ${files.length}</div>
+            <div class="selected-file-list">${firstNames.map(escapeHtml).join("<br>")}</div>
+            ${files.length > 5 ? `
+                <button type="button" class="btn btn-ghost btn-mini" data-show-selected-files>Показать все</button>
+                <div class="selected-file-list selected-file-list--all" hidden>${allNames.map(escapeHtml).join("<br>")}</div>
+            ` : ""}
+        `;
+        return;
+    }
     if (files.length === 0) {
         inferFilesHint.textContent = "Файлы для применения модели не выбраны.";
         return;
@@ -780,7 +825,63 @@ function renderText(obj) {
     if (resultsSection) resultsSection.style.display = "";
     if (rawJsonWrap) rawJsonWrap.style.display = "";
     if (!textResult) return;
+    ensureJsonCopyButton();
     textResult.textContent = JSON.stringify(obj, null, 2);
+}
+
+function ensureJsonCopyButton() {
+    if (!rawJsonWrap || !textResult || document.getElementById("copy-json-btn")) return;
+    const actions = document.createElement("div");
+    actions.className = "json-actions";
+    const button = document.createElement("button");
+    button.id = "copy-json-btn";
+    button.type = "button";
+    button.className = "btn btn-secondary";
+    button.textContent = "Скопировать JSON";
+    actions.appendChild(button);
+    rawJsonWrap.insertBefore(actions, textResult);
+}
+
+function formatDateTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function tidyAnalysisLayout() {
+    const legacyImportResult = previewResult?.closest?.(".card");
+    if (legacyImportResult) legacyImportResult.style.display = "none";
+    if (analysisRecommendations) analysisRecommendations.style.display = "none";
+
+    const methodGrid = document.querySelector(".preprocessing-method-grid");
+    const paramsGrid = document.querySelector(".preprocessing-params");
+    if (!methodGrid || !paramsGrid) return;
+
+    const sections = {
+        baseline: ["als", "polynomial", "rolling_ball"],
+        smoothing: ["savgol", "gaussian", "moving_average", "whittaker"],
+        crop: ["crop"],
+    };
+    const cropCard = document.querySelector('[data-pre-section="crop"]');
+    if (cropCard && cropCard.parentElement !== methodGrid) methodGrid.appendChild(cropCard);
+
+    Object.entries(sections).forEach(([section, params]) => {
+        const card = document.querySelector(`[data-pre-section="${section}"]`);
+        if (!card) return;
+        let inline = card.querySelector(".preprocessing-inline-params");
+        if (!inline) {
+            inline = document.createElement("div");
+            inline.className = "preprocessing-inline-params";
+            card.appendChild(inline);
+        }
+        params.forEach((param) => {
+            paramsGrid.querySelectorAll(`[data-pre-param="${param}"]`).forEach((field) => inline.appendChild(field));
+        });
+    });
+
+    if (!paramsGrid.children.length) paramsGrid.style.display = "none";
 }
 
 function clearStructuredBlocks() {
@@ -911,12 +1012,17 @@ function renderInferenceExplanation(payload) {
 
 function collectPredictionRows(payload) {
     const rows = [];
+    const reportWarnings = {};
+    (payload.inference_reports || []).forEach((report) => {
+        if (report?.filename) reportWarnings[report.filename] = (report.warnings || []).join("; ");
+    });
     if (Array.isArray(payload.predictions) && payload.predictions.length) {
         return payload.predictions.map((row, index) => ({
             sample_id: row.sample_id || row.file_name || row.filename || `sample_${index + 1}`,
             source_file: row.source_file || row.file_name || row.filename || "",
             predicted: row.predicted ?? row.prediction ?? row.predicted_class ?? row.value ?? "",
-            confidence: row.confidence ?? row.probability ?? row.proba ?? row.score ?? "",
+            confidence: formatInferenceConfidence(row),
+            warnings: reportWarnings[row.source_file || row.file_name || row.filename || ""] || "",
         }));
     }
     const batch = Array.isArray(payload.batch_results) ? payload.batch_results : [];
@@ -928,7 +1034,8 @@ function collectPredictionRows(payload) {
                 sample_id: result.sample_ids?.[index] || `${item.filename || "sample"}:${index + 1}`,
                 source_file: item.filename || "",
                 predicted: Array.isArray(value) ? value.join(";") : value,
-                confidence: result.confidence?.[index] ?? result.probability?.[index] ?? result.proba?.[index] ?? "",
+                confidence: formatInferenceConfidence({ confidence: result.confidence?.[index], probability: result.probability?.[index], proba: result.proba?.[index], score: result.score?.[index], decision_score: result.decision_score?.[index] }),
+                warnings: reportWarnings[item.filename || ""] || "",
             });
         });
     });
@@ -940,6 +1047,38 @@ function collectPredictionRows(payload) {
         aggregate.predictions.forEach((value, index) => rows.push({ sample_id: aggregate.sample_ids?.[index] || `sample_${index + 1}`, source_file: aggregate.source_files?.[index] || "", predicted: value, confidence: aggregate.confidence?.[index] ?? aggregate.probability?.[index] ?? "" }));
     }
     return rows;
+}
+
+function formatInferenceConfidence(row = {}) {
+    const value = row.confidence ?? row.probability ?? row.proba;
+    if (typeof value === "number") return `p=${value.toFixed(4)}`;
+    if (value !== undefined && value !== null && String(value).trim()) return String(value);
+    const score = row.decision_score ?? row.score;
+    if (typeof score === "number") return `score=${score.toFixed(4)}; вероятность недоступна`;
+    if (score !== undefined && score !== null && String(score).trim()) return `score=${score}; вероятность недоступна`;
+    return "вероятность недоступна";
+}
+
+function inferenceReportText(payload = {}) {
+    const meta = payload.model_metadata || {};
+    const reports = payload.inference_reports || (payload.inference_report ? [payload.inference_report] : []);
+    const first = reports[0] || {};
+    const preprocessing = meta.preprocessing_config || meta.preprocessing || {};
+    const interpolated = reports.some((item) => item.interpolated_to_model_axis);
+    const rangeWarning = reports.some((item) => item.range_warning);
+    return [
+        `Модель: ${meta.model_name || meta.model_id || payload.model_id || "н/д"}`,
+        `Тип модели: ${meta.model_type || payload.model_type || "н/д"}`,
+        `Обучающий dataset: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
+        `Версия данных: ${meta.dataset_version || (meta.used_processed_data ? "processed" : "raw")}`,
+        `Предобработка: baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`,
+        `Ожидаемые признаки: ${first.expected_feature_count || meta.expected_feature_count || meta.feature_count || "н/д"}`,
+        `Признаки во входном файле: ${first.input_feature_count || "н/д"}`,
+        `Признаки после подготовки: ${first.prepared_feature_count || "н/д"}`,
+        interpolated ? "Предупреждение: входные спектры были интерполированы на ось модели." : "",
+        rangeWarning ? "Предупреждение: диапазон входной оси не полностью покрывает диапазон модели." : "",
+        payload.warnings?.length ? `Предупреждения:\n- ${payload.warnings.join("\n- ")}` : "",
+    ].filter(Boolean).join("\n");
 }
 
 function renderPredictionsTable(payload) {
@@ -954,6 +1093,7 @@ function renderPredictionsTable(payload) {
             <td>${escapeHtml(row.source_file || row.sample_id)}</td>
             <td><strong>${escapeHtml(row.predicted)}</strong></td>
             <td>${escapeHtml(row.confidence)}</td>
+            <td>${escapeHtml(row.warnings || "")}</td>
         </tr>
     `).join("");
     comparisonResult.innerHTML = `
@@ -1026,6 +1166,7 @@ function renderStructuredResult(payload, mode) {
         const meta = payload.model_metadata || {};
         const filesCount = Array.isArray(payload.batch_results) ? payload.batch_results.length : 1;
         if (resultExplainer) resultExplainer.textContent = `Инференс выполнен.\nМодель: ${meta.model_id || "n/a"} (${meta.model_type || "n/a"})\nОбработано файлов: ${filesCount}`;
+        if (resultExplainer) resultExplainer.textContent = `Инференс выполнен.\n${inferenceReportText(payload)}\nОбработано файлов: ${filesCount}`;
         renderInferenceExplanation(payload);
         renderPredictionsTable(payload);
         updateResultDownloads(lastRenderedRunId);
@@ -1227,15 +1368,15 @@ function metricHelpText(keys = []) {
 function renderPlot(plotPayload) {
     if (resultsSection && plotPayload?.data) resultsSection.style.display = "";
     if (!plotPayload || !plotPayload.data) {
-        if (typeof Plotly !== "undefined") Plotly.purge("plot");
-        const plot = document.getElementById("plot");
+        const plot = ensurePlotElement("plot");
+        if (plot && typeof Plotly !== "undefined") Plotly.purge(plot);
         if (plot) {
             plot.classList.add("is-empty");
             plot.textContent = "Для этого результата графики не сформированы";
         }
         return;
     }
-    const plot = document.getElementById("plot");
+    const plot = ensurePlotElement("plot");
     if (plot) {
         plot.classList.remove("is-empty");
         plot.classList.remove("plot-stack");
@@ -1253,7 +1394,7 @@ function normalizePlotList(plots) {
 }
 
 function renderResultPlots(plots = []) {
-    const plotBox = document.getElementById("plot");
+    const plotBox = ensurePlotElement("plot");
     if (!plotBox) return;
     const normalized = normalizePlotList(plots);
     lastResultPlots = normalized;
@@ -1399,7 +1540,7 @@ function renderDatasetPreviewPlot(containerId, previewData, options = {}) {
     container.classList.remove("is-empty");
     container.classList.remove("plot-stack");
     container.textContent = "";
-    const linesCount = options.linesCount || "10";
+    const linesCount = options.linesCount || "5";
     const strategy = options.selectionStrategy || "balanced_by_class";
     const sampleIds = getSelectedSampleIds(previewData, linesCount, strategy);
     const traces = buildRawTraces(previewData, sampleIds);
@@ -1412,13 +1553,18 @@ function renderDatasetPreviewPlot(containerId, previewData, options = {}) {
 }
 
 function rerenderActivePreviewPlot() {
+    if (datasetPreviewStatus) datasetPreviewStatus.textContent = "График обновляется...";
     if (lastPreprocessingPreview) {
         renderPreprocessingPlot(lastPreprocessingPreview);
         return;
     }
+    if (importedDatasetId) {
+        renderImportedSpectraPreview(importedDatasetId).catch(() => {});
+        return;
+    }
     if (lastDatasetPreviewData) {
         renderDatasetPreviewPlot(datasetPreviewContainerId(), lastDatasetPreviewData, {
-            linesCount: prePlotLimitInput?.value || "10",
+            linesCount: prePlotLimitInput?.value || "5",
             selectionStrategy: safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class"),
         });
     }
@@ -1571,7 +1717,7 @@ async function importStandardDataset() {
         useImportedDatasetForTraining();
         if (data.preview) {
             lastDatasetPreviewData = data.preview;
-            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: "10", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
+            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: prePlotLimitInput?.value || "5", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
         } else {
             await renderImportedSpectraPreview(importedDatasetId);
         }
@@ -2471,7 +2617,7 @@ async function validateDatasetImport(fromPreview = false) {
         renderDatasetValidation(data);
         if (data.preview) {
             lastDatasetPreviewData = data.preview;
-            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: "10", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
+            renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: prePlotLimitInput?.value || "5", selectionStrategy: safeDatasetPreviewStrategy("balanced_by_class") });
         }
         if (!fromPreview) {
             renderText({ import_config: buildImportConfig(), validation: data });
@@ -2532,7 +2678,7 @@ async function importDataset() {
 
 async function renderImportedSpectraPreviewLegacy(datasetId) {
     if (importResultCard) importResultCard.style.display = "";
-    const limit = prePlotLimitInput?.value || "10";
+    const limit = prePlotLimitInput?.value || "5";
     const strategy = prePlotStrategyInput?.value || "balanced_by_class";
     const response = await fetch(`/analysis/dataset/${datasetId}/spectra-preview?limit=${encodeURIComponent(limit)}&strategy=${encodeURIComponent(strategy)}&version=raw`);
     const data = await response.json();
@@ -3425,7 +3571,7 @@ async function refreshModels() {
                 <td>${escapeHtml(model.task_type || "analysis")}</td>
                 <td>${escapeHtml(model.target_name || "нет")}</td>
                 <td>${escapeHtml(metricText || "н/д")}</td>
-                <td>${escapeHtml(model.created_at || "")}</td>
+                <td>${escapeHtml(formatDateTime(model.created_at))}</td>
                 <td class="actions">
                     <button type="button" class="btn btn-ghost" data-open-model="${escapeHtml(key)}">Открыть</button>
                     <button type="button" class="btn btn-secondary" data-load-model="${escapeHtml(key)}">Загрузить</button>
@@ -3466,7 +3612,7 @@ async function refreshRuns() {
             const metric = run.best_metric || run.metric || run.results?.best_metric || run.best_method || "н/д";
             return `
                 <tr data-run-id="${escapeHtml(run.run_id)}">
-                    <td>${escapeHtml(run.created_at || "")}<br><span class="muted">${escapeHtml(run.run_id)}</span></td>
+                    <td>${escapeHtml(formatDateTime(run.created_at))}<br><span class="muted">${escapeHtml(run.run_id)}</span></td>
                     <td>${escapeHtml(run.run_type || "analysis")}</td>
                     <td>${escapeHtml(run.best_method || run.method || "н/д")}</td>
                     <td>${escapeHtml(run.target_name || "нет")}</td>
@@ -3664,7 +3810,7 @@ function modelMetadataText(meta = {}) {
         `тип: ${meta.model_type || "н/д"}`,
         `задача: ${meta.task_type || "н/д"}`,
         `run_id: ${meta.run_id || "н/д"}`,
-        `создана: ${meta.created_at || "н/д"}`,
+        `создана: ${formatDateTime(meta.created_at) || "н/д"}`,
         `датасет: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
         `target: ${meta.target_name || "н/д"} (${meta.target_type || "н/д"})`,
         `метрики: ${JSON.stringify(meta.metrics || {}, null, 2)}`,
@@ -3979,11 +4125,12 @@ function applyAnalysisConfig(config = {}) {
 }
 
 async function renderImportedSpectraPreview(datasetId) {
-    const limit = prePlotLimitInput?.value || "10";
+    const limit = prePlotLimitInput?.value || "5";
     const strategy = safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class");
     const version = datasetPreviewVersionInput?.value || "raw";
     if (datasetPreviewStatus) datasetPreviewStatus.textContent = "Загрузка графика датасета...";
     try {
+        if (datasetPreviewStatus) datasetPreviewStatus.textContent = "График обновляется...";
         const response = await fetch(`/analysis/dataset/${datasetId}/spectra-preview?limit=${encodeURIComponent(limit)}&strategy=${encodeURIComponent(strategy)}&version=${encodeURIComponent(version)}`);
         const data = await responseJsonOrError(response, "Не удалось построить предпросмотр спектров.");
         if (!response.ok) throw new Error(humanError(data, "Не удалось построить предпросмотр спектров."));
@@ -3999,6 +4146,7 @@ async function renderImportedSpectraPreview(datasetId) {
 
 function initAnalysisPage() {
     initTheme();
+    tidyAnalysisLayout();
     bindClick("preview-btn", previewFile);
     bindClick("train-btn", trainModel);
     bindClick("refresh-models-btn", refreshModels);
@@ -4098,6 +4246,17 @@ function initAnalysisPage() {
         const loadModel = target?.getAttribute?.("data-load-model");
         const deleteModel = target?.getAttribute?.("data-delete-model");
         const downloadModelZip = target?.getAttribute?.("data-download-model-zip");
+        if (target?.hasAttribute?.("data-show-selected-files")) {
+            const fullList = target.parentElement?.querySelector?.(".selected-file-list--all");
+            if (fullList) {
+                fullList.hidden = false;
+                target.style.display = "none";
+            }
+        }
+        if (target?.id === "copy-json-btn" && textResult) {
+            navigator.clipboard?.writeText(textResult.textContent || "");
+            showToast("JSON скопирован.", "success");
+        }
         if (fullscreenId) openFullscreenPlot(fullscreenId);
         if (pngId) downloadPlotPng(pngId);
         if (recommendedModel) chooseRecommendedModel(recommendedModel);

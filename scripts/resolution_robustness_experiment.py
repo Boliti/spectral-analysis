@@ -15,6 +15,7 @@ from experiment_utils import (
     save_csv,
     simple_line_png,
     split_features_target,
+    WORKING_DATASET_MESSAGE,
 )
 
 
@@ -55,7 +56,7 @@ def main() -> None:
     df = read_table(input_path)
     X, y, _features = split_features_target(df, args.target)
     if y is None:
-        raise SystemExit(f"Target column '{args.target}' was not found.")
+        raise SystemExit(WORKING_DATASET_MESSAGE)
     y = np.asarray(y, dtype=str)
 
     modes = [("gaussian_sigma", v) for v in [0, 1, 2, 3, 5]]
