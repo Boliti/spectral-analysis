@@ -30,6 +30,7 @@ user_data/
 uploads/
 saved_models/
 saved_runs/
+saved_datasets/
 results/
 datasets/
 uploads/*
@@ -42,6 +43,8 @@ saved_models/*
 !saved_models/.gitkeep
 saved_runs/*
 !saved_runs/.gitkeep
+saved_datasets/*
+!saved_datasets/.gitkeep
 results/experiments/*
 !results/experiments/.gitkeep
 results/configs/*

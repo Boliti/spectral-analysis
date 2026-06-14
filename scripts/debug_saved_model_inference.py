@@ -184,6 +184,9 @@ def main() -> int:
     parser.add_argument("--txt-glob", default="*.txt", help="Glob for TXT files inside --txt-dir.")
     parser.add_argument("--per-class", type=int, default=10, help="Number of health and heart disease spectra to test.")
     parser.add_argument("--n-components", type=int, default=None, help="Optional PLS-DA n_components.")
+    parser.add_argument("--model-root", help="Root directory with saved model type folders, for example user_data/user_Admin11/models.")
+    parser.add_argument("--model-id", help="Existing saved model id to test, for example model_005. If omitted, a temporary PLS-DA model is trained.")
+    parser.add_argument("--model-type", default="plsda", help="Saved model type folder/name.")
     args = parser.parse_args()
 
     excel_path = _find_excel(args.excel)
@@ -193,21 +196,30 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="spectral_debug_infer_") as tmp:
         tmp_path = Path(tmp)
-        service = AnalysisService(model_root=tmp_path / "saved_models")
-        trained = service.train_and_save(
-            model_type="plsda",
-            dataset=training_dataset.to_analysis_dataset(version="raw"),
-            raw_targets="\n".join(str(value) for value in training_dataset.y),
-            n_components=args.n_components,
-            model_name="debug_plsda",
-            do_validation=True,
-            random_state=42,
-        )
-        saved = trained["saved_model"]
-        print(f"saved_model: {saved.get('model_type')} / {saved.get('model_id')}")
+        if args.model_id:
+            if not args.model_root:
+                raise ValueError("--model-root is required when --model-id is used.")
+            service = AnalysisService(model_root=Path(args.model_root))
+            _model, saved = service.model_manager.load(model_type=args.model_type, model_id=args.model_id)
+        else:
+            service = AnalysisService(model_root=tmp_path / "saved_models")
+            trained = service.train_and_save(
+                model_type="plsda",
+                dataset=training_dataset.to_analysis_dataset(version="raw"),
+                raw_targets="\n".join(str(value) for value in training_dataset.y),
+                n_components=args.n_components,
+                model_name="debug_plsda",
+                do_validation=True,
+                random_state=42,
+            )
+            saved = trained["saved_model"]
+        print(f"saved_model: {saved.get('model_type') or args.model_type} / {saved.get('model_id') or args.model_id}")
+        print(f"dataset_version: {saved.get('dataset_version')}, used_processed_data: {saved.get('used_processed_data')}")
+        print(f"preprocessing_config: {saved.get('preprocessing_config') or saved.get('preprocessing') or {}}")
         print(f"classes: {saved.get('classes') or saved.get('class_labels')}")
-        print(f"expected_feature_count: {saved.get('expected_feature_count')}")
-        print(f"axis_model: {saved.get('axis_min')}..{saved.get('axis_max')}")
+        print(f"expected_feature_count: {saved.get('expected_feature_count') or saved.get('feature_count') or saved.get('n_features')}")
+        axis_len = len(saved.get("spectral_axis") or saved.get("axis") or [])
+        print(f"axis_model: {saved.get('axis_min')}..{saved.get('axis_max')} (stored_points={axis_len})")
 
         if args.txt_dir:
             txt_files, true_by_file = _select_txt_files(Path(args.txt_dir), args.per_class, args.txt_glob)
@@ -225,7 +237,11 @@ def main() -> int:
         )
         infer_dataset = imported_txt.to_analysis_dataset(version="raw")
         items = [_slice_dataset(infer_dataset, idx, txt_files[idx].name) for idx in range(infer_dataset.sample_count)]
-        inferred = service.infer_many(model_type=saved["model_type"], model_id=saved["model_id"], datasets=items)
+        inferred = service.infer_many(
+            model_type=saved.get("model_type") or args.model_type,
+            model_id=saved.get("model_id") or args.model_id,
+            datasets=items,
+        )
 
         reports = {report.get("filename"): report for report in inferred.get("inference_reports") or []}
         batch = {item.get("filename"): item for item in inferred.get("batch_results") or []}

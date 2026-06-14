@@ -31,6 +31,8 @@ const datasetIdColumnInput = document.getElementById("dataset-id-column");
 const datasetTargetColumnInput = document.getElementById("dataset-target-column");
 const datasetAxisColumnInput = document.getElementById("dataset-axis-column");
 const datasetTargetSourceInput = document.getElementById("dataset-target-source");
+const targetCandidatesCard = document.getElementById("target-candidates-card");
+const targetCandidatesList = document.getElementById("target-candidates-list");
 const datasetTargetRegexInput = document.getElementById("dataset-target-regex");
 const datasetManualTargetInput = document.getElementById("dataset-manual-target");
 const datasetGridModeInput = document.getElementById("dataset-grid-mode");
@@ -60,6 +62,9 @@ const datasetExportZipBtn = document.getElementById("dataset-export-zip-btn");
 const datasetExportProcessedZipBtn = document.getElementById("dataset-export-processed-zip-btn");
 const datasetMetadataDownloadBtn = document.getElementById("dataset-metadata-download-btn");
 const preprocessingConfigDownloadBtn = document.getElementById("preprocessing-config-download-btn");
+const saveDatasetNameInput = document.getElementById("save-dataset-name");
+const saveDatasetVersionInput = document.getElementById("save-dataset-version");
+const savedDatasetsList = document.getElementById("saved-datasets-list");
 const datasetResetBtn = document.getElementById("dataset-reset-btn");
 const detectedMeasurementSummary = document.getElementById("detected-measurement-summary");
 const measurementApplyDetectedBtn = document.getElementById("measurement-apply-detected-btn");
@@ -85,6 +90,8 @@ const prePlotVisibilityInput = document.getElementById("pre-plot-visibility");
 const analysisRecommendations = document.getElementById("analysis-recommendations");
 const analysisStepGuide = document.getElementById("analysis-step-guide");
 const analysisRunSummary = document.getElementById("analysis-run-summary");
+const methodParamsSimple = document.getElementById("method-params-simple");
+const methodParamsFields = document.getElementById("method-params-fields");
 const modelConfigModeInput = document.getElementById("model-config-mode");
 const analysisGoalInput = document.getElementById("analysis-goal");
 const compareMethodsBtn = document.getElementById("compare-methods-btn");
@@ -192,14 +199,17 @@ function valuesFromMetadata(summaryOrMeta = {}, key) {
     return uniqueValues([...(Array.isArray(direct) ? direct : [direct]), ...sampleValues, single]);
 }
 
-function formatDetectedValues(values, unit = "") {
+function formatDetectedValues(values, unit = "", options = {}) {
     const clean = uniqueValues(values);
     if (!clean.length) return "";
     const numeric = clean.map(Number).filter((value) => Number.isFinite(value));
     if (numeric.length === clean.length) {
         numeric.sort((a, b) => a - b);
         if (numeric.length === 1) return `${formatNumber(numeric[0])}${unit}`;
-        return `${formatNumber(numeric[0])}-${formatNumber(numeric[numeric.length - 1])}${unit}, ${numeric.length} values`;
+        if (options.listValues || numeric.length <= 4) {
+            return `${numeric.map(formatNumber).join(", ")}${unit}`;
+        }
+        return `${formatNumber(numeric[0])}–${formatNumber(numeric[numeric.length - 1])}${unit}, ${numeric.length} значений`;
     }
     return `${clean.slice(0, 4).join(", ")}${clean.length > 4 ? `, +${clean.length - 4}` : ""}${unit}`;
 }
@@ -207,10 +217,10 @@ function formatDetectedValues(values, unit = "") {
 function detectedMeasurementCards(summaryOrMeta = {}) {
     return [
         ["Щель", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "slit_width_um"), " мкм")],
-        ["Решётка", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "grating_lines_mm"), " штр./мм")],
-        ["Экспозиция", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "exposure_time_s"), " с")],
-        ["Накопления", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "accumulations"), "")],
-        ["Мощность", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "power_mw"), " мВт")],
+        ["Решётка", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "grating_lines_mm"), " штр./мм", { listValues: true })],
+        ["Экспозиция", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "exposure_time_s"), " с", { listValues: true })],
+        ["Накопления", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "accumulations"), "", { listValues: true })],
+        ["Мощность", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "power_mw"), " мВт", { listValues: true })],
         ["Образец", formatDetectedValues(valuesFromMetadata(summaryOrMeta, "sample_name"), "")],
     ].filter(([, value]) => value);
 }
@@ -228,7 +238,7 @@ function renderDetectedMeasurementSummary(summaryOrMeta = {}) {
     detectedMeasurementSummary.innerHTML = `
         <strong>Обнаруженные параметры измерений</strong>
         <div class="measurement-card-grid">
-            ${cards.map(([label, value]) => `<div class="measurement-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
+            ${cards.map(([label, value]) => `<div class="measurement-card"><span>${escapeHtml(label)}:</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
         </div>
     `;
     if (measurementApplyDetectedBtn) measurementApplyDetectedBtn.disabled = false;
@@ -706,22 +716,24 @@ function updateModelAdvancedSettings(modelType) {
     const simple = (modelConfigModeInput?.value || "simple") === "simple";
     const map = {
         pca: ["n_components"],
-        plsda: ["n_components", "validation", "test_size", "random_state"],
-        pls: ["n_components", "validation", "test_size", "random_state"],
-        svm: ["kernel", "C", "gamma", "class_weight", "validation", "test_size", "random_state"],
-        random_forest: ["n_estimators", "max_depth", "class_weight", "validation", "test_size", "random_state"],
-        decision_tree: ["max_depth", "class_weight", "validation", "test_size", "random_state"],
+        plsda: ["n_components"],
+        pls: ["n_components"],
+        svm: ["C", "kernel", "gamma"],
+        random_forest: ["n_estimators", "max_depth", "random_state"],
+        decision_tree: ["max_depth", "random_state"],
         kmeans: ["n_clusters", "random_state", "standardize_cluster"],
         hca: ["n_clusters", "linkage", "standardize_cluster"],
-        svr: ["kernel", "C", "gamma", "epsilon", "validation", "test_size", "random_state"],
-        compare_classification: ["validation", "test_size", "random_state", "class_weight"],
-        compare_regression: ["validation", "test_size", "random_state"],
+        svr: ["C", "epsilon", "kernel", "gamma"],
+        compare_classification: ["random_state"],
+        compare_regression: ["random_state"],
         compare_clustering: ["n_clusters", "random_state", "linkage"],
     };
     const allowed = new Set(map[modelType] || []);
     document.querySelectorAll("[data-model-param]").forEach((node) => {
         node.style.display = !simple && allowed.has(node.dataset.modelParam) ? "flex" : "none";
     });
+    if (methodParamsFields) methodParamsFields.style.display = simple ? "none" : "";
+    renderMethodParamsSimple(modelType);
     renderAnalysisWorkflowGuide(importedDatasetSummary);
     renderAnalysisRunSummary();
 }
@@ -1514,7 +1526,7 @@ function buildClassMeanTraces(dataset, source = "raw") {
 }
 
 function datasetPreviewContainerId() {
-    return datasetPreviewPlot ? "dataset-preview-plot" : "dataset-plot";
+    return "dataset-preview-plot";
 }
 
 function datasetHasTarget(summary = importedDatasetSummary) {
@@ -1811,11 +1823,100 @@ function setTargetSourceOptions(layout) {
         option.textContent = label;
         datasetTargetSourceInput.appendChild(option);
     });
+    if (current?.startsWith?.("metadata:")) {
+        ensureTargetSourceOption(current, current.split(":")[1]);
+    }
     if (options.some(([value]) => value === current)) {
+        datasetTargetSourceInput.value = current;
+    } else if (current?.startsWith?.("metadata:")) {
         datasetTargetSourceInput.value = current;
     } else {
         datasetTargetSourceInput.value = options[0][0];
     }
+}
+
+function ensureTargetSourceOption(value, label = value) {
+    if (!datasetTargetSourceInput || !value) return;
+    if (!Array.from(datasetTargetSourceInput.options || []).some((option) => option.value === value)) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label || value;
+        datasetTargetSourceInput.appendChild(option);
+    }
+}
+
+function targetTypeLabel(type) {
+    if (type === "numeric") return "числовой";
+    if (type === "categorical") return "категориальный";
+    if (type === "none") return "без target";
+    return type || "н/д";
+}
+
+function targetCandidateText(candidate) {
+    if (!candidate || candidate.target_type === "none") return "PCA и кластеризация";
+    const examples = Array.isArray(candidate.examples) && candidate.examples.length
+        ? candidate.examples.join(", ")
+        : "н/д";
+    if (candidate.target_type === "numeric") {
+        const range = candidate.min !== undefined && candidate.max !== undefined
+            ? `диапазон ${formatNumber(candidate.min)}–${formatNumber(candidate.max)}`
+            : `${candidate.unique_count || 0} значений`;
+        return `регрессия · ${range} · примеры: ${examples}`;
+    }
+    return `классификация · ${candidate.unique_count || 0} классов · примеры: ${examples}`;
+}
+
+function candidateSourceLabel(candidate) {
+    const labels = {
+        none: "Без target",
+        sheet_name: "Имя листа Excel",
+        folder_name: "Имя папки",
+        column: "Колонка таблицы",
+        filename_regex: "Regex из имени файла",
+    };
+    if (candidate.source?.startsWith?.("metadata:")) return candidate.name;
+    return labels[candidate.source] || candidate.label || candidate.name || candidate.source;
+}
+
+function applyTargetCandidate(candidate) {
+    if (!candidate || !datasetTargetSourceInput) return;
+    ensureTargetSourceOption(candidate.source, candidateSourceLabel(candidate));
+    datasetTargetSourceInput.value = candidate.source || "none";
+    if (candidate.source === "column" && datasetTargetColumnInput) {
+        datasetTargetColumnInput.value = candidate.name || "";
+    }
+    if (candidate.source === "filename_regex" && datasetTargetRegexInput) {
+        datasetTargetRegexInput.value = candidate.regex || datasetTargetRegexInput.value || "^([^_\\s-]+)";
+    }
+    if (candidate.source === "sheet_name" && datasetSheetModeInput) {
+        datasetSheetModeInput.value = "sheet_as_class";
+    }
+    updateDatasetLayoutUI();
+    renderTargetCandidates(datasetPreviewPayload?.target_candidates || []);
+    renderImportCheckSummary();
+}
+
+function renderTargetCandidates(candidates = []) {
+    if (!targetCandidatesCard || !targetCandidatesList) return;
+    if (!Array.isArray(candidates) || !candidates.length) {
+        targetCandidatesCard.style.display = "none";
+        targetCandidatesList.innerHTML = "";
+        return;
+    }
+    targetCandidatesCard.style.display = "";
+    const current = datasetTargetSourceInput?.value || "none";
+    targetCandidatesList.innerHTML = candidates.map((candidate, index) => {
+        const selected = current === candidate.source && (candidate.source !== "column" || !datasetTargetColumnInput || datasetTargetColumnInput.value === candidate.name);
+        const warning = candidate.warning ? `<div class="target-candidate-warning">${escapeHtml(candidate.warning)}</div>` : "";
+        return `
+            <button type="button" class="target-candidate-card ${selected ? "is-active" : ""}" data-target-candidate-index="${index}">
+                <strong>${escapeHtml(candidate.label || candidate.name || "Без target")}</strong>
+                <span>${escapeHtml(targetTypeLabel(candidate.target_type))} · ${escapeHtml(candidateSourceLabel(candidate))}</span>
+                <small>${escapeHtml(targetCandidateText(candidate))}</small>
+                ${warning}
+            </button>
+        `;
+    }).join("");
 }
 
 function updateDatasetLayoutCards() {
@@ -1897,6 +1998,13 @@ function fillDatasetMappingControls(payload) {
         datasetTargetSourceInput.value = "none";
     }
     updateDatasetLayoutUI();
+    const candidates = payload.target_candidates || [];
+    const safeDefault = candidates.find((candidate) => candidate.safe_default && candidate.source !== "none");
+    if (safeDefault && suggested !== "txt_folder") {
+        applyTargetCandidate(safeDefault);
+    } else {
+        renderTargetCandidates(candidates);
+    }
     updateProcessingBlockVisibility();
 }
 
@@ -1993,6 +2101,11 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
         if (targetSource === "none") {
             lines.push("- Target: не задан");
             lines.push("- Доступны PCA, k-means, HCA и анализ параметров спектрометра");
+        } else if (targetSource.startsWith("metadata:")) {
+            const field = targetSource.split(":")[1];
+            const candidate = (datasetPreviewPayload?.target_candidates || []).find((item) => item.source === targetSource);
+            lines.push(`- target: ${field}`);
+            if (candidate) lines.push(`- задача: ${candidate.recommended_task}; уникальных значений: ${candidate.unique_count}`);
         } else if (targetSource === "file_name") {
             lines.push("- target: имя файла");
             lines.push("- предупреждение: каждый файл может образовать отдельный класс; для классификации это непригодно");
@@ -2205,6 +2318,7 @@ function renderDatasetReady(summary) {
         ? `numeric, ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}, уровней: ${summary.target_unique_count ?? "н/д"}`
         : classes;
     const tiles = [
+        ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д"],
         ["Спектров", summary.n_samples],
         ["Признаков", summary.n_features],
         ["Target", summary.target_name || "нет"],
@@ -2234,6 +2348,7 @@ function renderDatasetReady(summary) {
             <summary>Показать технические сведения</summary>
             <pre>${escapeHtml(technical)}</pre>
         </details>
+        ${sourceFilesDetails(summary.source_files || summary.metadata?.source_files || [])}
     `;
     datasetReadyCard.style.display = "block";
     if (datasetPreviewVersionInput) {
@@ -2308,8 +2423,8 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
     return [
         {
             goal: "explore",
-            title: "Визуальный анализ",
-            selectTitle: "Посмотреть структуру данных (PCA)",
+            title: "PCA",
+            selectTitle: "PCA",
             methods: "PCA",
             description: "Показать структуру спектров, группы и выбросы.",
             enabled: true,
@@ -2318,7 +2433,7 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
         {
             goal: "cluster",
             title: "Кластеризация",
-            selectTitle: "Найти группы спектров (кластеризация)",
+            selectTitle: "Кластеризация",
             methods: "k-means, HCA",
             description: "Найти группы спектров без заранее заданных классов.",
             enabled: true,
@@ -2327,7 +2442,7 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
         {
             goal: "classify",
             title: "Классификация",
-            selectTitle: "Классифицировать спектры",
+            selectTitle: "Классификация",
             methods: "PLS-DA, SVM, Random Forest, Decision Tree",
             description: "Обучить модель относить спектры к заданным классам.",
             enabled: categoricalTarget,
@@ -2336,7 +2451,7 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
         {
             goal: "regress",
             title: "Регрессия",
-            selectTitle: "Предсказать числовой параметр",
+            selectTitle: "Регрессия",
             methods: "PLS Regression, SVR",
             description: "Предсказать числовой параметр, например концентрацию.",
             enabled: numericTarget,
@@ -2435,6 +2550,44 @@ function ensureAnalysisSelection(summary = importedDatasetSummary) {
     return { task: selectedAnalysisTask, method: selectedAnalysisMethod };
 }
 
+function methodParamsText(modelType = selectedAnalysisMethod || modelTypeInput?.value || "") {
+    const randomState = randomStateInput?.value || "42";
+    const nClusters = document.getElementById("model-n-clusters")?.value || "2";
+    const nComponents = nComponentsInput?.value || "авто";
+    const kernel = document.getElementById("model-kernel")?.value || "rbf";
+    const cValue = document.getElementById("model-c")?.value || "1.0";
+    const gamma = document.getElementById("model-gamma")?.value || "scale";
+    const epsilon = document.getElementById("model-epsilon")?.value || "0.1";
+    const estimators = document.getElementById("model-n-estimators")?.value || "200";
+    const maxDepth = document.getElementById("model-max-depth")?.value || "без ограничения";
+    const linkage = document.getElementById("model-linkage")?.value || "ward";
+    const standardize = document.getElementById("model-standardize-cluster")?.checked ? "да" : "нет";
+    const params = {
+        pca: [`n_components=${nComponents}`],
+        plsda: [`n_components=${nComponents}`],
+        pls: [`n_components=${nComponents}`],
+        kmeans: [`n_clusters=${nClusters}`, `random_state=${randomState}`, `стандартизация=${standardize}`],
+        hca: [`n_clusters=${nClusters}`, `linkage=${linkage}`],
+        svm: [`C=${cValue}`, `kernel=${kernel}`, `gamma=${gamma}`],
+        random_forest: [`n_estimators=${estimators}`, `max_depth=${maxDepth}`, `random_state=${randomState}`],
+        decision_tree: [`max_depth=${maxDepth}`, `random_state=${randomState}`],
+        svr: [`C=${cValue}`, `epsilon=${epsilon}`, `kernel=${kernel}`, `gamma=${gamma}`],
+        compare_classification: [`random_state=${randomState}`],
+        compare_regression: [`random_state=${randomState}`],
+        compare_clustering: [`n_clusters=${nClusters}`, `random_state=${randomState}`, `linkage=${linkage}`],
+    };
+    return (params[modelType] || [`random_state=${randomState}`]).join(", ");
+}
+
+function renderMethodParamsSimple(modelType = selectedAnalysisMethod || modelTypeInput?.value || "") {
+    if (!methodParamsSimple) return;
+    const simple = (modelConfigModeInput?.value || "simple") === "simple";
+    methodParamsSimple.style.display = simple ? "" : "none";
+    methodParamsSimple.textContent = simple
+        ? `Параметры подобраны автоматически: ${methodParamsText(modelType)}`
+        : "";
+}
+
 function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
     if (!analysisStepGuide) return;
     const { hasTarget, numericTarget, categoricalTarget } = targetState(summary);
@@ -2446,9 +2599,7 @@ function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
         </option>
     `).join("");
     const methods = methodsForAnalysisGoal(selectedGoal, summary);
-    const methodCards = selectedGoal === "compare"
-        ? `<div class="analysis-empty-note">Будет запущено сравнение доступных методов.</div>`
-        : methods.length ? methods.map((method) => {
+    const methodCards = methods.length ? methods.map((method) => {
         const [title, description, usage] = ANALYSIS_METHOD_INFO[method] || [method, "", ""];
         const active = selectedModel === method;
         return `
@@ -2462,11 +2613,7 @@ function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
             </button>
         `;
     }).join("") : `<div class="analysis-empty-note">Для выбранной задачи сейчас нет доступных методов: проверьте target в датасете.</div>`;
-    const targetLine = hasTarget
-        ? `Target: ${summary?.target_name || "target"} · тип: ${numericTarget ? "числовой" : "категориальный"} · доступны ${categoricalTarget ? "классификация и сравнение методов" : "регрессия и сравнение методов"}`
-        : "Target не задан. Доступны PCA и кластеризация. Для классификации или регрессии нужен target";
     analysisStepGuide.innerHTML = `
-        <div class="analysis-target-info ${hasTarget ? "analysis-target-info--ok" : "analysis-target-info--empty"}">${escapeHtml(targetLine)}</div>
         <section class="analysis-section analysis-section--compact">
             <h4>1. Что сделать?</h4>
             <label class="analysis-select-label">
@@ -2479,13 +2626,9 @@ function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
         <section class="analysis-section analysis-section--compact">
             <h4>2. Каким методом?</h4>
             <div class="analysis-method-list">${methodCards}</div>
-            <div id="analysis-selection-summary" class="analysis-selection-summary"></div>
-        </section>
-        <section class="analysis-section analysis-section--compact">
-            <h4>3. Параметры</h4>
-            <p class="analysis-next-step">В простом режиме параметры подобраны автоматически. Для ручной настройки включите расширенный режим ниже.</p>
         </section>
     `;
+    renderMethodParamsSimple(selectedModel);
     renderAnalysisRunSummary();
 }
 
@@ -2500,9 +2643,7 @@ function renderAnalysisRunSummary() {
     const simple = (modelConfigModeInput?.value || "simple") === "simple";
     const trainBtn = document.getElementById("train-btn");
     if (!selectedAnalysisTask || (!selectedAnalysisMethod && selectedAnalysisTask !== "compare")) {
-        analysisRunSummary.innerHTML = `<div class="analysis-run-summary__main">Сначала выберите задачу анализа и метод.</div>`;
-        const selectionSummary = document.getElementById("analysis-selection-summary");
-        if (selectionSummary) selectionSummary.textContent = "Сначала выберите задачу анализа и метод.";
+        analysisRunSummary.innerHTML = `<div class="analysis-run-summary__main">Будет запущено: выберите задачу анализа и метод.</div>`;
         if (trainBtn) {
             trainBtn.disabled = true;
             trainBtn.textContent = "Запустить анализ";
@@ -2510,39 +2651,23 @@ function renderAnalysisRunSummary() {
         return;
     }
     const parts = [
-        `Выбрано: ${task?.title || "задача"}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
+        `Будет запущено: ${task?.title || "задача"}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
         `данные: ${datasetVersion}`,
         `target: ${targetName}`,
     ];
-    const paramParts = [];
-    if (["kmeans", "hca", "compare_clustering"].includes(modelType)) {
-        paramParts.push(`число кластеров = ${document.getElementById("model-n-clusters")?.value || "2"}`);
-    }
-    if (["pca", "plsda", "pls"].includes(modelType)) {
-        paramParts.push(`число компонент = ${nComponentsInput?.value || "авто"}`);
-    }
-    if (["kmeans", "svm", "random_forest", "decision_tree", "svr"].includes(modelType)) {
-        paramParts.push(`случайное зерно = ${randomStateInput?.value || "42"}`);
-    }
-    if (paramParts.length) {
-        parts.push(`Параметры: ${paramParts.join(", ")}`);
-    }
-    const selectionSummary = document.getElementById("analysis-selection-summary");
+    parts.push(`параметры: ${methodParamsText(modelType)}`);
     const summaryText = parts.join(" · ");
-    if (selectionSummary) {
-        selectionSummary.textContent = summaryText;
-    }
     if (trainBtn) {
         const buttonLabels = {
             pca: "Запустить PCA",
             kmeans: "Запустить k-means",
             hca: "Запустить HCA",
-            plsda: "Запустить PLS-DA",
+            plsda: "Обучить PLS-DA",
             svm: "Запустить SVM",
             random_forest: "Запустить Random Forest",
             decision_tree: "Запустить Decision Tree",
-            pls: "Запустить PLS Regression",
-            svr: "Запустить SVR",
+            pls: "Обучить PLS Regression",
+            svr: "Обучить SVR",
             compare_classification: "Сравнить методы",
             compare_regression: "Сравнить методы",
             compare_clustering: "Сравнить методы",
@@ -2552,7 +2677,6 @@ function renderAnalysisRunSummary() {
     }
     analysisRunSummary.innerHTML = `
         <div class="analysis-run-summary__main">${escapeHtml(summaryText)}</div>
-        ${simple ? `<div class="analysis-run-summary__hint">Параметры подобраны автоматически. Чтобы изменить их, включите расширенный режим.</div>` : ""}
     `;
     if (compareMethodsBtn) {
         compareMethodsBtn.style.display = "none";
@@ -2567,6 +2691,31 @@ function escapeHtml(value) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+}
+
+function shortText(value, max = 56) {
+    const text = String(value ?? "");
+    return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
+}
+
+function sourceFilesDetails(files = []) {
+    if (!Array.isArray(files) || !files.length) return "";
+    const first = files.slice(0, 5);
+    return `
+        <details class="source-files-details">
+            <summary>Показать исходные файлы</summary>
+            <div>Файлов: ${files.length}</div>
+            <ul>
+                ${first.map((name) => `<li title="${escapeHtml(name)}">${escapeHtml(shortText(name, 72))}</li>`).join("")}
+            </ul>
+            ${files.length > 5 ? `
+                <button type="button" class="btn btn-ghost btn-mini" data-show-source-files>Показать все</button>
+                <ul class="source-files-list--all" hidden>
+                    ${files.map((name) => `<li title="${escapeHtml(name)}">${escapeHtml(shortText(name, 96))}</li>`).join("")}
+                </ul>
+            ` : ""}
+        </details>
+    `;
 }
 
 function chooseRecommendedModel(modelType) {
@@ -2684,7 +2833,7 @@ async function renderImportedSpectraPreviewLegacy(datasetId) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Не удалось построить предпросмотр спектров.");
     lastDatasetPreviewData = data;
-    renderDatasetPreviewPlot("dataset-plot", data, { linesCount: limit, selectionStrategy: strategy });
+    renderDatasetPreviewPlot(datasetPreviewContainerId(), data, { linesCount: limit, selectionStrategy: strategy });
 }
 
 async function downloadImportConfig() {
@@ -2739,6 +2888,141 @@ function exportImportedDataset(format, version = "raw") {
     setTimeout(hideGlobalLoading, 1500);
 }
 
+async function refreshSavedDatasets() {
+    if (!savedDatasetsList) return;
+    savedDatasetsList.textContent = "Загрузка сохранённых датасетов...";
+    try {
+        const response = await fetch("/analysis/saved-datasets");
+        const data = await responseJsonOrError(response, "Не удалось загрузить сохранённые датасеты.");
+        if (!response.ok) throw new Error(humanError(data, "Не удалось загрузить сохранённые датасеты."));
+        const items = data.datasets || [];
+        if (!items.length) {
+            savedDatasetsList.innerHTML = "<p class=\"muted\">Сохранённых датасетов пока нет.</p>";
+            return;
+        }
+        const rows = items.map((item) => {
+            const classes = Array.isArray(item.classes) ? item.classes.join(", ") : (item.classes || "нет");
+            const pre = item.preprocessing_summary || {};
+            const preConfig = item.preprocessing_config || {};
+            const baseline = pre.baseline || preConfig.baseline?.method || pre.config?.baseline?.method || "off";
+            const smoothing = pre.smoothing || preConfig.smoothing?.method || pre.config?.smoothing?.method || "off";
+            const normalization = pre.normalization || preConfig.normalization?.method || pre.config?.normalization?.method || "off";
+            const preprocessingText = item.version === "processed"
+                ? [methodLabel(baseline), methodLabel(smoothing), methodLabel(normalization)].filter((v) => v && v !== "выключено").join(" + ") || "processed"
+                : "raw";
+            return `
+            <tr data-saved-dataset-id="${escapeHtml(item.dataset_id)}">
+                <td class="dataset-name-cell" title="${escapeHtml(item.dataset_name || item.dataset_id)}"><strong>${escapeHtml(shortText(item.dataset_name || item.dataset_id, 52))}</strong><br><span class="muted">${escapeHtml(shortText(item.dataset_id, 16))}</span></td>
+                <td>${escapeHtml(item.version || "raw")}</td>
+                <td>${escapeHtml(item.n_samples ?? "н/д")}</td>
+                <td>${escapeHtml(item.n_features ?? "н/д")}</td>
+                <td>${escapeHtml(item.target_column || "нет")}<br><span class="muted">${escapeHtml(item.target_type || "")}</span></td>
+                <td>${escapeHtml(classes)}</td>
+                <td>${escapeHtml(preprocessingText)}</td>
+                <td>${escapeHtml(formatDateTime(item.created_at))}</td>
+                <td class="actions">
+                    <button type="button" class="btn btn-secondary" data-use-saved-dataset="${escapeHtml(item.dataset_id)}">Использовать</button>
+                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="csv">CSV</button>
+                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="xlsx">XLSX</button>
+                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="json">JSON</button>
+                    <button type="button" class="btn btn-ghost" data-download-saved-dataset="${escapeHtml(item.dataset_id)}" data-format="zip">ZIP</button>
+                    <button type="button" class="btn btn-danger" data-delete-saved-dataset="${escapeHtml(item.dataset_id)}">Удалить</button>
+                </td>
+            </tr>
+        `;
+        }).join("");
+        savedDatasetsList.innerHTML = `
+            <table class="compact-table">
+                <thead><tr><th>Название</th><th>Версия</th><th>Спектров</th><th>Признаков</th><th>Target</th><th>Классы</th><th>Предобработка</th><th>Дата</th><th>Действия</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+    } catch (error) {
+        savedDatasetsList.textContent = error.message;
+        showToast(error.message, "error");
+    }
+}
+
+async function saveCurrentDataset() {
+    if (!importedDatasetId) {
+        showToast("Сначала импортируйте датасет.", "warning");
+        return;
+    }
+    const version = saveDatasetVersionInput?.value === "processed" ? "processed" : "raw";
+    if (version === "processed" && !processedDatasetReady) {
+        showToast("Processed-версия ещё не создана.", "warning");
+        return;
+    }
+    const response = await fetchWithTimeout("/analysis/saved-datasets/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            dataset_id: importedDatasetId,
+            dataset_name: saveDatasetNameInput?.value || "",
+            version,
+        }),
+    });
+    const data = await responseJsonOrError(response, "Не удалось сохранить датасет.");
+    if (!response.ok) throw new Error(humanError(data, "Не удалось сохранить датасет."));
+    showToast("Датасет сохранён.", "success");
+    await refreshSavedDatasets();
+}
+
+async function useSavedDataset(savedId) {
+    const response = await fetch(`/analysis/saved-datasets/${encodeURIComponent(savedId)}/use`, { method: "POST" });
+    const data = await responseJsonOrError(response, "Не удалось загрузить сохранённый датасет.");
+    if (!response.ok) throw new Error(humanError(data, "Не удалось загрузить сохранённый датасет."));
+    importedDatasetId = data.dataset_id;
+    importedDatasetSummary = data.summary;
+    processedDatasetReady = Boolean(data.summary?.has_processed);
+    if (trainDatasetVersionInput) {
+        Array.from(trainDatasetVersionInput.options).forEach((option) => {
+            if (option.value === "processed") option.disabled = !processedDatasetReady;
+        });
+    }
+    if (datasetPreviewVersionInput) {
+        Array.from(datasetPreviewVersionInput.options).forEach((option) => {
+            if (option.value === "processed") option.disabled = !processedDatasetReady;
+        });
+    }
+    renderDatasetReady(data.summary);
+    renderDatasetSummary(data.summary);
+    lastDatasetPreviewData = data.preview || null;
+    if (data.preview) {
+        renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: prePlotLimitInput?.value || "5", selectionStrategy: safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class") });
+    }
+    if (trainDatasetVersionInput) trainDatasetVersionInput.value = data.version || "raw";
+    setActiveDataset(importedDatasetId, importedDatasetSummary);
+    showToast("Сохранённый датасет выбран для анализа.", "success");
+}
+
+async function deleteSavedDataset(savedId) {
+    if (!confirm("Удалить сохранённый датасет?")) return;
+    const response = await fetch(`/analysis/saved-datasets/${encodeURIComponent(savedId)}`, { method: "DELETE" });
+    const data = await responseJsonOrError(response, "Не удалось удалить сохранённый датасет.");
+    if (!response.ok) throw new Error(humanError(data, "Не удалось удалить сохранённый датасет."));
+    showToast("Сохранённый датасет удалён.", "success");
+    await refreshSavedDatasets();
+}
+
+async function renameSavedDataset(savedId, currentName = "") {
+    const nextName = prompt("Новое название датасета", currentName || "");
+    if (!nextName || !nextName.trim()) return;
+    const response = await fetch(`/analysis/saved-datasets/${encodeURIComponent(savedId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset_name: nextName.trim() }),
+    });
+    const data = await responseJsonOrError(response, "Не удалось переименовать датасет.");
+    if (!response.ok) throw new Error(humanError(data, "Не удалось переименовать датасет."));
+    showToast("Датасет переименован.", "success");
+    await refreshSavedDatasets();
+}
+
+function downloadSavedDataset(savedId, format) {
+    window.location.href = `/analysis/saved-datasets/${encodeURIComponent(savedId)}/download?format=${encodeURIComponent(format || "csv")}`;
+}
+
 async function downloadPreprocessingConfig() {
     if (!importedDatasetId || !processedDatasetReady) {
         alert("Сначала примените предобработку.");
@@ -2775,7 +3059,8 @@ function setActiveDataset(datasetId, summary = null) {
     activeDatasetBadge.classList.remove("loaded-badge--empty");
     activeDatasetBadge.classList.add("loaded-badge--ok");
     const version = trainDatasetVersionInput?.value === "processed" ? "предобработанная версия" : "исходная версия";
-    activeDatasetBadge.textContent = `Используется импортированный датасет: ${datasetId}, ${version}. Спектров: ${summary?.n_samples ?? "н/д"}, признаков: ${summary?.n_features ?? "н/д"}.`;
+    const name = summary?.metadata?.dataset_name || summary?.dataset_name || datasetId;
+    activeDatasetBadge.textContent = `Источник данных: ${name}, ${version}. Спектров: ${summary?.n_samples ?? "н/д"}, признаков: ${summary?.n_features ?? "н/д"}.`;
     if (trainFileInput) {
         trainFileInput.disabled = true;
     }
@@ -2829,10 +3114,14 @@ function resetModelState() {
     clearStructuredBlocks();
     setLoadedModelBadge();
     setActiveDataset(null);
+    refreshSavedDatasets().catch((error) => showToast("warning", `Не удалось загрузить сохранённые датасеты: ${error.message}`));
 }
 
 function resetCharts() {
-    ["dataset-preview-plot", "dataset-plot", "preprocessing-plot", "validation-plot", "plot"].forEach((id) => Plotly.purge(id));
+    ["dataset-preview-plot", "preprocessing-plot", "validation-plot", "plot"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) Plotly.purge(el);
+    });
 }
 
 function resetMessages() {
@@ -3571,6 +3860,8 @@ async function refreshModels() {
                 <td>${escapeHtml(model.task_type || "analysis")}</td>
                 <td>${escapeHtml(model.target_name || "нет")}</td>
                 <td>${escapeHtml(metricText || "н/д")}</td>
+                <td class="dataset-name-cell" title="${escapeHtml(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д")}">${escapeHtml(shortText(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д", 52))}<br><span class="muted">${escapeHtml(shortText(model.dataset_id || "", 8))}</span></td>
+                <td>${escapeHtml(model.dataset_version || "raw")}</td>
                 <td>${escapeHtml(formatDateTime(model.created_at))}</td>
                 <td class="actions">
                     <button type="button" class="btn btn-ghost" data-open-model="${escapeHtml(key)}">Открыть</button>
@@ -3583,7 +3874,7 @@ async function refreshModels() {
     }).join("");
     modelsList.innerHTML = `
         <table class="compact-table">
-            <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Target</th><th>Метрика</th><th>Дата</th><th>Действия</th></tr></thead>
+            <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Target</th><th>Метрика</th><th>Датасет</th><th>Версия</th><th>Дата</th><th>Действия</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
     `;
@@ -3628,7 +3919,7 @@ async function refreshRuns() {
         }).join("");
         runsList.innerHTML = `
             <table class="compact-table">
-                <thead><tr><th>Дата</th><th>Тип</th><th>Метод</th><th>Target</th><th>Метрика</th><th>Статус</th><th>Действия</th></tr></thead>
+                <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Target</th><th>Метрика</th><th>Датасет</th><th>Версия</th><th>Дата</th><th>Действия</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         `;
@@ -3811,7 +4102,7 @@ function modelMetadataText(meta = {}) {
         `задача: ${meta.task_type || "н/д"}`,
         `run_id: ${meta.run_id || "н/д"}`,
         `создана: ${formatDateTime(meta.created_at) || "н/д"}`,
-        `датасет: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
+        `датасет: ${meta.dataset_name || meta.dataset_id || "н/д"}${meta.dataset_id ? ` (${shortText(meta.dataset_id, 8)})` : ""}`,
         `target: ${meta.target_name || "н/д"} (${meta.target_type || "н/д"})`,
         `метрики: ${JSON.stringify(meta.metrics || {}, null, 2)}`,
         `использовались обработанные данные: ${meta.used_processed_data ? "да" : "нет"}`,
@@ -3833,7 +4124,7 @@ function renderModelMetadataCard(meta = {}) {
         ["Target", meta.target_name || "н/д"],
         ["Классы", classes || "н/д"],
         ["Метрики", Object.keys(metrics).length ? Object.entries(metrics).map(([k, v]) => `${k}: ${typeof v === "number" ? v.toFixed(4) : v}`).join("; ") : "н/д"],
-        ["Dataset", meta.dataset_id || meta.source_dataset_name || "н/д"],
+        ["Dataset", meta.dataset_name || meta.dataset_id || "н/д"],
         ["Предобработка", `baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`],
         ["Ожидается признаков", meta.feature_count || meta.n_features || "н/д"],
         ["Диапазон оси", Array.isArray(meta.axis_range) ? meta.axis_range.join("-") : "н/д"],
@@ -4164,6 +4455,13 @@ function initAnalysisPage() {
     bindClick("dataset-metadata-download-btn", downloadDatasetMetadata);
     bindClick("dataset-config-download-btn", downloadImportConfig);
     bindClick("dataset-use-btn", useImportedDatasetForTraining);
+    bindClick("choose-other-dataset-btn", () => {
+        resetDatasetImport();
+        document.getElementById("import-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    bindClick("use-saved-dataset-btn", () => {
+        document.getElementById("saved-datasets-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
     bindClick("dataset-show-plot-btn", () => {
         if (!importedDatasetId) {
             showToast("warning", "Сначала загрузите или импортируйте датасет.");
@@ -4185,6 +4483,8 @@ function initAnalysisPage() {
     bindClick("dataset-export-processed-csv-btn", () => exportImportedDataset("csv", "processed"));
     bindClick("dataset-export-processed-xlsx-btn", () => exportImportedDataset("xlsx", "processed"));
     bindClick("dataset-export-processed-zip-btn", () => exportImportedDataset("zip", "processed"));
+    bindClick("save-dataset-btn", () => saveCurrentDataset().catch((error) => showToast(error.message, "error")));
+    bindClick("refresh-saved-datasets-btn", () => refreshSavedDatasets());
     bindClick("preprocessing-config-download-btn", downloadPreprocessingConfig);
     bindClick("preprocessing-reset-raman-btn", resetPreprocessingToRaman);
     bindClick("measurement-apply-detected-btn", () => {
@@ -4246,8 +4546,28 @@ function initAnalysisPage() {
         const loadModel = target?.getAttribute?.("data-load-model");
         const deleteModel = target?.getAttribute?.("data-delete-model");
         const downloadModelZip = target?.getAttribute?.("data-download-model-zip");
+        const useSavedDatasetId = target?.getAttribute?.("data-use-saved-dataset");
+        const deleteSavedDatasetId = target?.getAttribute?.("data-delete-saved-dataset");
+        const downloadSavedDatasetId = target?.getAttribute?.("data-download-saved-dataset");
+        const renameSavedDatasetId = target?.getAttribute?.("data-rename-saved-dataset");
+        const targetCandidateIndex = target?.closest?.("[data-target-candidate-index]")?.getAttribute?.("data-target-candidate-index");
+        if (useSavedDatasetId) useSavedDataset(useSavedDatasetId).catch((error) => showToast(error.message, "error"));
+        if (deleteSavedDatasetId) deleteSavedDataset(deleteSavedDatasetId).catch((error) => showToast(error.message, "error"));
+        if (downloadSavedDatasetId) downloadSavedDataset(downloadSavedDatasetId, target?.getAttribute?.("data-format") || "csv");
+        if (renameSavedDatasetId) renameSavedDataset(renameSavedDatasetId, target?.getAttribute?.("data-current-name") || "").catch((error) => showToast(error.message, "error"));
+        if (targetCandidateIndex !== null && targetCandidateIndex !== undefined) {
+            const candidate = datasetPreviewPayload?.target_candidates?.[Number(targetCandidateIndex)];
+            if (candidate) applyTargetCandidate(candidate);
+        }
         if (target?.hasAttribute?.("data-show-selected-files")) {
             const fullList = target.parentElement?.querySelector?.(".selected-file-list--all");
+            if (fullList) {
+                fullList.hidden = false;
+                target.style.display = "none";
+            }
+        }
+        if (target?.hasAttribute?.("data-show-source-files")) {
+            const fullList = target.parentElement?.querySelector?.(".source-files-list--all");
             if (fullList) {
                 fullList.hidden = false;
                 target.style.display = "none";
@@ -4411,7 +4731,10 @@ function initAnalysisPage() {
         document.getElementById("model-n-estimators"),
         document.getElementById("model-max-depth"),
     ].forEach((input) => {
-        if (input) input.addEventListener("change", renderAnalysisRunSummary);
+        if (input) input.addEventListener("change", () => {
+            renderMethodParamsSimple(selectedAnalysisMethod || modelTypeInput?.value || "pca");
+            renderAnalysisRunSummary();
+        });
     });
     if (inferFileInput) {
         inferFileInput.addEventListener("change", updateInferFilesHint);

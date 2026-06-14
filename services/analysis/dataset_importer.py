@@ -345,6 +345,117 @@ def _sheet_preview(name: str, df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def _target_candidate(name: str, values: Sequence[Any], target_type: Optional[str] = None, source: str = "column", **extra: Any) -> Optional[Dict[str, Any]]:
+    clean = [value for value in values if value is not None and str(value) != ""]
+    if not clean:
+        return None
+    unique = []
+    for value in clean:
+        text = str(value)
+        if text not in unique:
+            unique.append(text)
+    inferred = target_type or _target_type([str(value) for value in clean])
+    numeric_values: List[float] = []
+    if inferred == "numeric":
+        for value in clean:
+            try:
+                numeric_values.append(float(str(value).replace(",", ".")))
+            except ValueError:
+                pass
+        if len(numeric_values) != len(clean):
+            inferred = "categorical"
+    candidate = {
+        "name": name,
+        "source": source,
+        "target_type": inferred,
+        "unique_count": len(unique),
+        "examples": unique[:5],
+        "recommended_task": "регрессия" if inferred == "numeric" else "классификация",
+        **extra,
+    }
+    if inferred == "numeric" and numeric_values:
+        candidate["min"] = float(np.min(numeric_values))
+        candidate["max"] = float(np.max(numeric_values))
+    return candidate
+
+
+def _excel_target_candidates(sheets: Dict[str, pd.DataFrame], layout: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = [
+        {
+            "name": "none",
+            "label": "Без target",
+            "source": "none",
+            "target_type": "none",
+            "unique_count": 0,
+            "examples": [],
+            "recommended_task": "PCA/кластеризация",
+        }
+    ]
+    if layout == "excel_columns" and len(sheets) > 1:
+        names = list(sheets.keys())
+        item = _target_candidate("sheet_name", names, "categorical", "sheet_name")
+        if item:
+            item["safe_default"] = True
+            candidates.append(item)
+    for sheet_name, df in sheets.items():
+        clean = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+        if clean.empty:
+            continue
+        for col in clean.columns:
+            name = str(col)
+            if _looks_like_axis_column(name) or _numeric_header(name):
+                continue
+            series = clean[col].dropna()
+            if series.empty:
+                continue
+            unique_count = int(series.astype(str).nunique())
+            numeric = pd.to_numeric(series, errors="coerce")
+            is_numeric = numeric.notna().sum() >= max(1, int(len(series) * 0.8))
+            looks_target = _looks_like_target_column(name) or name.lower() in {"concentration", "conc"}
+            if looks_target or (not is_numeric and 1 < unique_count <= max(12, len(series) // 2)) or (is_numeric and 1 < unique_count < len(series)):
+                item = _target_candidate(name, series.tolist(), "numeric" if is_numeric and not _looks_like_class_target_column(name) else "categorical", "column", sheet=sheet_name)
+                if item and not any(existing.get("name") == item["name"] and existing.get("source") == item["source"] for existing in candidates):
+                    candidates.append(item)
+    return candidates
+
+
+def _txt_target_candidates(spectra: Sequence[str], sample_metadata: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = [
+        {
+            "name": "none",
+            "label": "Без target",
+            "source": "none",
+            "target_type": "none",
+            "unique_count": 0,
+            "examples": [],
+            "recommended_task": "PCA/кластеризация",
+            "safe_default": True,
+        }
+    ]
+    folders = [Path(name).parts[-2] for name in spectra if len(Path(name).parts) > 1]
+    folder_candidate = _target_candidate("folder_name", folders, "categorical", "folder_name")
+    if folder_candidate and 1 < folder_candidate["unique_count"] < len(spectra):
+        candidates.append(folder_candidate)
+    metadata_fields = {
+        "grating_lines_mm": "categorical",
+        "slit_width_um": "numeric",
+        "power_mw": "numeric",
+        "sample_name": "categorical",
+    }
+    for field, target_type in metadata_fields.items():
+        values = [item.get(field) for item in sample_metadata]
+        item = _target_candidate(field, values, target_type, f"metadata:{field}")
+        if item and item["unique_count"] > 1:
+            candidates.append(item)
+    stems = [Path(name).stem for name in spectra]
+    first_tokens = [re.split(r"[_\s-]+", stem)[0] for stem in stems if re.split(r"[_\s-]+", stem)[0]]
+    regex_item = _target_candidate("filename_prefix", first_tokens, "categorical", "filename_regex", regex=r"^([^_\s-]+)")
+    if regex_item and 1 < regex_item["unique_count"] < len(stems):
+        regex_item["label"] = "Префикс имени файла"
+        candidates.append(regex_item)
+    return candidates
+
+
 def _detect_excel_layout(sheets: Dict[str, pd.DataFrame]) -> Tuple[str, float, List[str]]:
     reasons: List[str] = []
     first_name, first_df = next(iter(sheets.items()))
@@ -436,6 +547,7 @@ def preview_files(files: Sequence[UploadedFileData]) -> Dict[str, Any]:
     if len(files) == 1 and _is_excel(file.filename):
         sheets = _read_excel_sheets(file, header=0)
         result["excel"] = {"sheets": [_sheet_preview(name, df) for name, df in sheets.items()]}
+        result["target_candidates"] = _excel_target_candidates(sheets, detected.get("layout", "manual"))
     elif len(files) == 1 and _is_zip(file.filename):
         spectra, nested_archives = _zip_file_entries(file)
         preview_metadata = [_metadata_from_spectrum_filename(name) for name in spectra[:500]]
@@ -447,8 +559,11 @@ def preview_files(files: Sequence[UploadedFileData]) -> Dict[str, Any]:
             "metadata": _detected_measurement_metadata(preview_metadata),
             "sample_metadata_preview": preview_metadata[:10],
         }
+        result["target_candidates"] = _txt_target_candidates(spectra, preview_metadata)
     else:
         result["separate_files"] = [item.filename for item in files]
+        preview_metadata = [_metadata_from_spectrum_filename(item.filename) for item in files]
+        result["target_candidates"] = _txt_target_candidates([item.filename for item in files], preview_metadata)
     return result
 
 
@@ -978,10 +1093,20 @@ def _parse_two_column_text(content: bytes, filename: str) -> Tuple[np.ndarray, n
     return axis[order], intensity[order], reverse_axis, False
 
 
-def _target_from_path(name: str, source: str, manual_target: Optional[str], filename_regex: Optional[str] = None) -> Optional[str]:
+def _target_from_path(
+    name: str,
+    source: str,
+    manual_target: Optional[str],
+    filename_regex: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     path = Path(name)
     if source in {"none", "no_target", "", None}:
         return None
+    if str(source).startswith("metadata:"):
+        key = str(source).split(":", 1)[1]
+        value = (metadata or {}).get(key)
+        return None if value is None else str(value)
     if source in {"folder_name", "class_from_folder"}:
         parts = path.parts
         return str(parts[-2]) if len(parts) > 1 else None
@@ -1113,7 +1238,7 @@ class TxtFolderSpectraParser:
             metadata = _metadata_from_spectrum_filename(name)
             if intensity_only:
                 metadata["intensity_only"] = True
-            target = _target_from_path(name, target_source, manual_target, filename_regex)
+            target = _target_from_path(name, target_source, manual_target, filename_regex, metadata=metadata)
             if target is not None:
                 metadata["target"] = target
             spectra.append((name, target, axis, intensity, reversed_axis, intensity_only))
@@ -1143,6 +1268,14 @@ class TxtFolderSpectraParser:
 
         y = [target for _name, target, _axis, _intensity, _rev, _one_col in spectra if target is not None]
         y_out = y if len(y) == len(spectra) else None
+        selected_target_type = _target_type(y_out)
+        target_name = target_source if y_out else None
+        if y_out and target_source.startswith("metadata:"):
+            target_name = target_source.split(":", 1)[1]
+            if target_name in {"grating_lines_mm", "sample_name"}:
+                selected_target_type = "categorical"
+            elif target_name in {"slit_width_um", "power_mw"}:
+                selected_target_type = "numeric"
         target_warning: Optional[str] = None
         if y_out:
             distribution = Counter(y_out)
@@ -1152,6 +1285,8 @@ class TxtFolderSpectraParser:
                     "Выберите 'Без target' или задайте regex, который группирует файлы в классы."
                 )
                 y_out = None
+                target_name = None
+                selected_target_type = "none"
         detected_measurements = _detected_measurement_metadata(sample_metadata)
         slit_values = detected_measurements.get("slit_width_um_values", [])
         grating_values = detected_measurements.get("grating_lines_mm_values", [])
@@ -1161,10 +1296,11 @@ class TxtFolderSpectraParser:
             axis=axis_out.astype(float),
             sample_ids=[Path(item[0]).stem for item in spectra],
             y=y_out,
-            target_name=target_source if y_out else None,
-            class_names=_class_names(y_out),
+            target_name=target_name,
+            class_names=None if selected_target_type == "numeric" else _class_names(y_out),
             metadata={
                 "import_config": config,
+                "target_type": selected_target_type,
                 "nested_archives": nested_archives,
                 "reverse_axis_files": [name for name, _target, _axis, _intensity, rev, _one_col in spectra if rev],
                 "single_column_intensity_files": [name for name, _target, _axis, _intensity, _rev, one_col in spectra if one_col],

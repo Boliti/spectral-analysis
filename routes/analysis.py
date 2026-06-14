@@ -6,6 +6,8 @@ import os
 import io
 import zipfile
 import csv
+import pickle
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +45,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 MODELS_DIR = BASE_DIR / "saved_models"
 RESULTS_DIR = BASE_DIR / "results"
 RUNS_DIR = Path(os.getenv("SAVED_RUNS_DIR", str(BASE_DIR / "saved_runs")))
+SAVED_DATASETS_DIR = Path(os.getenv("SAVED_DATASETS_DIR", str(BASE_DIR / "saved_datasets")))
 CONFIGS_DIR = RESULTS_DIR / "configs"
 REPORTS_DIR = RESULTS_DIR / "reports"
 USER_DATA_DIR = BASE_DIR / os.getenv("USER_DATA_DIR", "user_data")
@@ -149,6 +152,182 @@ def persist_user_dataset(dataset: SpectralDataset, user: Dict[str, Any]) -> None
     )
 
 
+def saved_datasets_root(user: Dict[str, Any]) -> Path:
+    root = SAVED_DATASETS_DIR / _safe_user_segment(user["user_id"])
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _slug(value: Any, fallback: str = "dataset") -> str:
+    text = str(value or "").strip()
+    text = "".join(ch if ch.isalnum() else "_" for ch in text)
+    text = "_".join(part for part in text.split("_") if part)
+    return text[:80] or fallback
+
+
+def _preprocessing_suffix(dataset: SpectralDataset) -> str:
+    cfg = dataset.preprocessing_config or {}
+    parts: List[str] = []
+    baseline = (cfg.get("baseline") or {}).get("method")
+    smoothing = (cfg.get("smoothing") or {}).get("method")
+    normalization = (cfg.get("normalization") or {}).get("method")
+    if baseline and baseline != "off":
+        parts.append(str(baseline).upper())
+    if smoothing and smoothing != "off":
+        parts.append("SG" if str(smoothing).lower() == "savgol" else str(smoothing).upper())
+    if normalization and normalization != "off":
+        parts.append(str(normalization).upper())
+    return "_".join(parts)
+
+
+def _dataset_short_name(dataset: SpectralDataset, version: str = "raw") -> str:
+    source_text = " ".join(dataset.source_files[:3]).lower()
+    if "raman_krov" in source_text or "krov" in source_text or "ssz" in source_text:
+        base = "Raman_krov"
+    elif "slit" in source_text or "andor" in source_text or dataset.metadata.get("grating_lines_mm_values"):
+        gratings = dataset.metadata.get("grating_lines_mm_values") or []
+        grating_part = "_" + "_".join(str(int(v)) if isinstance(v, (int, float)) and float(v).is_integer() else str(v) for v in gratings[:3]) if gratings else ""
+        base = f"Andor_slit{grating_part}"
+    else:
+        first_source = Path(dataset.source_files[0]).stem if dataset.source_files else "dataset"
+        base = _slug(first_source, "dataset")
+    suffix = f"_{_preprocessing_suffix(dataset)}" if version == "processed" and _preprocessing_suffix(dataset) else ""
+    return f"{base}_{version}{suffix}"
+
+
+def _default_saved_dataset_name(dataset: SpectralDataset, version: str) -> str:
+    date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"{_dataset_short_name(dataset, version)}_{date}"
+
+
+def _saved_dataset_metadata(dataset: SpectralDataset, saved_id: str, dataset_name: str, version: str, data_path: Path) -> Dict[str, Any]:
+    summary = dataset.summary(version=version)
+    preprocessing_summary = summary.get("preprocessing") or {}
+    if version == "processed" and dataset.processed_axis is not None:
+        preprocessing_summary = {
+            "n_features": int(dataset.processed_axis.size),
+            "axis_min": float(np.min(dataset.processed_axis)) if dataset.processed_axis.size else None,
+            "axis_max": float(np.max(dataset.processed_axis)) if dataset.processed_axis.size else None,
+            "config": dataset.preprocessing_config or {},
+        }
+    return {
+        "dataset_id": saved_id,
+        "dataset_name": dataset_name,
+        "source_file_name": ";".join(dataset.source_files[:3]),
+        "version": version,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "n_samples": summary.get("n_samples"),
+        "n_features": summary.get("n_features"),
+        "target_column": dataset.target_name,
+        "target_type": summary.get("target_type"),
+        "classes": summary.get("class_names") or list((summary.get("class_distribution") or {}).keys()),
+        "axis_min": summary.get("axis_min"),
+        "axis_max": summary.get("axis_max"),
+        "preprocessing_config": dataset.preprocessing_config if version == "processed" else {},
+        "preprocessing_summary": preprocessing_summary,
+        "data_path": str(data_path),
+        "metadata": dataset.metadata_export(version=version),
+        "raw_metadata": dataset.metadata,
+        "source_layout": dataset.source_layout,
+        "source_files": dataset.source_files,
+        "sample_metadata": dataset.sample_metadata or [],
+    }
+
+
+def _saved_dataset_dir(user: Dict[str, Any], saved_id: str) -> Path:
+    safe_id = _slug(saved_id, "saved_dataset")
+    target = saved_datasets_root(user) / safe_id
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Сохранённый датасет не найден")
+    return target
+
+
+def _read_saved_dataset_meta(path: Path) -> Dict[str, Any]:
+    return json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+
+
+def _optional_str_array(values: Optional[List[Any]]) -> np.ndarray:
+    if values is None:
+        return np.array([], dtype=str)
+    return np.asarray([str(value) for value in values], dtype=str)
+
+
+def _write_saved_dataset_npz(dataset: SpectralDataset, target_dir: Path) -> None:
+    processed_X = dataset.processed_X if dataset.processed_X is not None else np.empty((0, 0), dtype=float)
+    processed_axis = dataset.processed_axis if dataset.processed_axis is not None else np.array([], dtype=float)
+    np.savez_compressed(
+        target_dir / "dataset.npz",
+        X=np.asarray(dataset.X, dtype=float),
+        spectral_axis=np.asarray(dataset.axis, dtype=float),
+        processed_X=np.asarray(processed_X, dtype=float),
+        processed_axis=np.asarray(processed_axis, dtype=float),
+        sample_ids=np.asarray(dataset.sample_ids, dtype=str),
+        y=_optional_str_array(dataset.y),
+        class_names=_optional_str_array(dataset.class_names),
+        group_ids=_optional_str_array(dataset.group_ids),
+        source_sheets=_optional_str_array(dataset.source_sheets),
+        source_items=_optional_str_array(dataset.source_items),
+    )
+
+
+def _load_saved_dataset(target_dir: Path) -> SpectralDataset:
+    metadata = _read_saved_dataset_meta(target_dir)
+    npz_path = target_dir / "dataset.npz"
+    if npz_path.exists():
+        with np.load(npz_path, allow_pickle=False) as data:
+            processed_X = np.asarray(data["processed_X"], dtype=float) if "processed_X" in data else np.empty((0, 0), dtype=float)
+            processed_axis = np.asarray(data["processed_axis"], dtype=float) if "processed_axis" in data else np.array([], dtype=float)
+            y_arr = data["y"].astype(str).tolist() if "y" in data and data["y"].size else None
+            class_arr = data["class_names"].astype(str).tolist() if "class_names" in data and data["class_names"].size else None
+            group_arr = data["group_ids"].astype(str).tolist() if "group_ids" in data and data["group_ids"].size else None
+            sheets_arr = data["source_sheets"].astype(str).tolist() if "source_sheets" in data and data["source_sheets"].size else None
+            items_arr = data["source_items"].astype(str).tolist() if "source_items" in data and data["source_items"].size else None
+            exported_meta = metadata.get("metadata") or {}
+            raw_metadata = metadata.get("raw_metadata") if isinstance(metadata.get("raw_metadata"), dict) else {}
+            exported_source_files = exported_meta.get("source_files")
+            if isinstance(exported_source_files, list):
+                source_files = [str(item) for item in exported_source_files]
+            else:
+                raw_source_files = metadata.get("source_files")
+                source_files = [str(item) for item in raw_source_files] if isinstance(raw_source_files, list) else str(metadata.get("source_file_name") or metadata.get("dataset_name") or "saved_dataset").split(";")
+            dataset = SpectralDataset(
+                X=np.asarray(data["X"], dtype=float),
+                axis=np.asarray(data["spectral_axis"], dtype=float),
+                sample_ids=data["sample_ids"].astype(str).tolist(),
+                y=y_arr,
+                target_name=metadata.get("target_column") or exported_meta.get("target_name"),
+                class_names=class_arr or metadata.get("classes"),
+                metadata=dict(raw_metadata or exported_meta.get("metadata") or exported_meta or {}),
+                source_layout=str(metadata.get("source_layout") or exported_meta.get("source_layout") or "saved_dataset"),
+                source_files=source_files,
+                group_ids=group_arr,
+                source_sheets=sheets_arr,
+                source_items=items_arr,
+                sample_metadata=(metadata.get("sample_metadata") if isinstance(metadata.get("sample_metadata"), list) else None),
+                processed_X=processed_X if processed_X.size else None,
+                processed_axis=processed_axis if processed_axis.size else None,
+                preprocessing_config=metadata.get("preprocessing_config") or None,
+            )
+            dataset.metadata.setdefault("target_type", metadata.get("target_type"))
+            dataset.metadata.setdefault("dataset_name", metadata.get("dataset_name"))
+            return dataset
+    with (target_dir / "dataset.pkl").open("rb") as handle:
+        return pickle.load(handle)
+
+
+def _write_saved_dataset_files(dataset: SpectralDataset, target_dir: Path, version: str, metadata: Dict[str, Any]) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _write_saved_dataset_npz(dataset, target_dir)
+    with (target_dir / "dataset.pkl").open("wb") as handle:
+        pickle.dump(dataset, handle)
+    dataset.to_export_frame(version=version).to_csv(target_dir / f"{version}.csv", index=False)
+    try:
+        dataset.to_export_frame(version=version).to_excel(target_dir / f"{version}.xlsx", index=False)
+    except Exception:
+        pass
+    (target_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def resolve_user_model(user: Dict[str, Any], model_id: str, model_type: Optional[str] = None) -> Dict[str, str]:
     manager = user_analysis_service(user).model_manager
     if model_type:
@@ -212,6 +391,16 @@ class ModelTrainRequest(BaseModel):
     model_params: Dict[str, Any] = Field(default_factory=dict)
     validation: Dict[str, Any] = Field(default_factory=dict)
     target_column: Optional[str] = None
+
+
+class SaveDatasetRequest(BaseModel):
+    dataset_id: str
+    dataset_name: Optional[str] = None
+    version: str = "raw"
+
+
+class RenameSavedDatasetRequest(BaseModel):
+    dataset_name: str
 
 
 @router.get("")
@@ -296,6 +485,7 @@ async def dataset_import(
         config = _read_config(import_config)
         dataset = import_dataset(memory_files, config)
         _attach_owner(dataset, user)
+        dataset.metadata["dataset_name"] = _dataset_short_name(dataset, "raw")
         validation = validate_dataset(dataset)
         if validation["status"] == "error":
             return {"status": "error", "validation": validation}
@@ -322,6 +512,7 @@ async def dataset_import_standard(request: Request, file: UploadFile = File(...)
         raw = await file.read()
         dataset = _parse_standard_dataset(raw, file.filename or "standard_dataset")
         _attach_owner(dataset, user)
+        dataset.metadata["dataset_name"] = _dataset_short_name(dataset, "raw")
         validation = validate_dataset(dataset)
         if validation["status"] == "error":
             return {"status": "error", "validation": validation}
@@ -467,7 +658,138 @@ def _parse_standard_dataset(raw: bytes, filename: str) -> SpectralDataset:
         source_sheets=source_sheets,
         source_items=source_items,
         sample_metadata=sample_metadata,
-    )
+        )
+
+
+@router.get("/saved-datasets")
+async def list_saved_datasets(request: Request):
+    user = current_analysis_user(request)
+    root = saved_datasets_root(user)
+    items: List[Dict[str, Any]] = []
+    for meta_path in sorted(root.glob("*/metadata.json")):
+        try:
+            items.append(json.loads(meta_path.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    items.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return {"status": "ok", "datasets": items}
+
+
+@router.post("/saved-datasets/save")
+async def save_current_dataset(request: Request, payload: SaveDatasetRequest):
+    user = current_analysis_user(request)
+    dataset = get_owned_dataset(payload.dataset_id, user)
+    version = "processed" if payload.version == "processed" else "raw"
+    if version == "processed" and dataset.processed_X is None:
+        raise HTTPException(status_code=400, detail="Processed-версия датасета ещё не создана")
+    name = _slug(payload.dataset_name or _default_saved_dataset_name(dataset, version), "dataset")
+    saved_id = f"{name}_{uuid.uuid4().hex[:8]}"
+    target_dir = saved_datasets_root(user) / saved_id
+    data_path = target_dir / f"{version}.csv"
+    metadata = _saved_dataset_metadata(dataset, saved_id=saved_id, dataset_name=name, version=version, data_path=data_path)
+    metadata["source_runtime_dataset_id"] = payload.dataset_id
+    _write_saved_dataset_files(dataset, target_dir, version, metadata)
+    return {"status": "ok", "saved_dataset": metadata}
+
+
+@router.post("/saved-datasets/{saved_id}/use")
+async def use_saved_dataset(request: Request, saved_id: str):
+    user = current_analysis_user(request)
+    target_dir = _saved_dataset_dir(user, saved_id)
+    metadata = _read_saved_dataset_meta(target_dir)
+    dataset = _load_saved_dataset(target_dir)
+    _attach_owner(dataset, user)
+    dataset.metadata["saved_dataset_id"] = saved_id
+    dataset.metadata["dataset_name"] = metadata.get("dataset_name")
+    dataset_id = dataset_store.put(dataset)
+    persist_user_dataset(dataset, user)
+    version = "processed" if metadata.get("version") == "processed" and dataset.processed_X is not None else "raw"
+    return {
+        "status": "ok",
+        "dataset_id": dataset_id,
+        "saved_dataset_id": saved_id,
+        "version": version,
+        "summary": dataset.summary(version=version),
+        "metadata": metadata,
+        "preview": spectra_preview(dataset, limit=10, strategy="balanced_by_class", version=version),
+    }
+
+
+@router.patch("/saved-datasets/{saved_id}")
+async def rename_saved_dataset(request: Request, saved_id: str, payload: RenameSavedDatasetRequest):
+    user = current_analysis_user(request)
+    target_dir = _saved_dataset_dir(user, saved_id)
+    metadata = _read_saved_dataset_meta(target_dir)
+    new_name = _slug(payload.dataset_name, "dataset")
+    metadata["dataset_name"] = new_name
+    metadata["renamed_at"] = datetime.now(timezone.utc).isoformat()
+    (target_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"status": "ok", "saved_dataset": metadata}
+
+
+@router.delete("/saved-datasets/{saved_id}")
+async def delete_saved_dataset(request: Request, saved_id: str):
+    user = current_analysis_user(request)
+    target_dir = _saved_dataset_dir(user, saved_id)
+    for child in target_dir.iterdir():
+        if child.is_file():
+            child.unlink()
+    target_dir.rmdir()
+    return {"status": "ok", "deleted": saved_id}
+
+
+async def _stream_saved_dataset_export(request: Request, saved_id: str, format: str = "csv"):
+    user = current_analysis_user(request)
+    target_dir = _saved_dataset_dir(user, saved_id)
+    metadata = _read_saved_dataset_meta(target_dir)
+    version = metadata.get("version") or "raw"
+    fmt = format.lower()
+    if fmt == "zip":
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(target_dir / "metadata.json", "metadata.json")
+            if (target_dir / "dataset.npz").exists():
+                archive.write(target_dir / "dataset.npz", "dataset.npz")
+            if (target_dir / f"{version}.csv").exists():
+                archive.write(target_dir / f"{version}.csv", f"{version}.csv")
+            if (target_dir / f"{version}.xlsx").exists():
+                archive.write(target_dir / f"{version}.xlsx", f"{version}.xlsx")
+        buffer.seek(0)
+        return StreamingResponse(buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename={saved_id}.zip"})
+    if fmt == "json":
+        dataset = _load_saved_dataset(target_dir)
+        X, axis = dataset._matrix_for_version(version)
+        payload = {
+            "metadata": metadata,
+            "dataset": {
+                **dataset.to_jsonable(),
+                "version": version,
+                "X": X.tolist(),
+                "spectral_axis": axis.tolist(),
+                "sample_ids": dataset.sample_ids,
+                "y": dataset.y,
+            },
+        }
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        return StreamingResponse(io.BytesIO(content), media_type="application/json", headers={"Content-Disposition": f"attachment; filename={saved_id}.json"})
+    file_path = target_dir / f"{version}.{fmt}"
+    if not file_path.exists() and fmt == "xlsx":
+        dataset = _load_saved_dataset(target_dir)
+        dataset.to_export_frame(version=version).to_excel(file_path, index=False)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Экспорт сохранённого датасета не найден")
+    media = "text/csv" if fmt == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return StreamingResponse(io.BytesIO(file_path.read_bytes()), media_type=media, headers={"Content-Disposition": f"attachment; filename={saved_id}_{version}.{fmt}"})
+
+
+@router.get("/saved-datasets/{saved_id}/download")
+async def download_saved_dataset(request: Request, saved_id: str, format: str = "csv"):
+    return await _stream_saved_dataset_export(request, saved_id, format)
+
+
+@router.get("/saved-datasets/{saved_id}/export")
+async def export_saved_dataset(request: Request, saved_id: str, format: str = "csv"):
+    return await _stream_saved_dataset_export(request, saved_id, format)
 
 
 @router.get("/dataset/{dataset_id}/summary")
@@ -569,6 +891,7 @@ async def dataset_preprocess_apply(request: Request, dataset_id: str, preprocess
         user = current_analysis_user(request)
         dataset = get_owned_dataset(dataset_id, user)
         result = apply_preprocessing(dataset, preprocessing_config)
+        dataset.metadata["dataset_name"] = _dataset_short_name(dataset, "processed")
         persist_user_dataset(dataset, user)
         manager = user_run_manager(user)
         run_id = manager.new_run_id("processing")
@@ -577,8 +900,9 @@ async def dataset_preprocess_apply(request: Request, dataset_id: str, preprocess
             {
                 "run_id": run_id,
                 "run_type": "processing",
-                "dataset_id": dataset_id,
-                "dataset_name": ";".join(dataset.source_files[:3]),
+                "dataset_id": dataset.metadata.get("saved_dataset_id") or dataset_id,
+                "runtime_dataset_id": dataset_id,
+                "dataset_name": dataset.metadata.get("dataset_name") or _dataset_short_name(dataset, "processed"),
                 "used_processed_data": True,
                 "target_name": dataset.target_name,
                 "target_type": dataset.summary().get("target_type"),
@@ -651,6 +975,7 @@ async def train_model_from_dataset(
             random_state=random_state,
             metadata_extra={
                 "dataset_id": dataset_id,
+                "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
                 "source_dataset_name": ";".join(imported.source_files[:3]),
                 "dataset_version": version,
                 "used_processed_data": version == "processed",
@@ -663,6 +988,7 @@ async def train_model_from_dataset(
                 "raw_spectral_axis": imported.axis.astype(float).tolist(),
                 "import_config": imported.import_config(),
                 "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
+                "preprocessing_summary": imported.summary(version=version).get("preprocessing") or {},
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
                 "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
                 "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
@@ -716,7 +1042,9 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
             random_state=int(validation.get("random_state", 42)),
             model_params=payload.model_params,
             metadata_extra={
-                "dataset_id": payload.dataset_id,
+                "dataset_id": imported.metadata.get("saved_dataset_id") or payload.dataset_id,
+                "runtime_dataset_id": payload.dataset_id,
+                "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
                 "source_dataset_name": ";".join(imported.source_files[:3]),
                 "dataset_version": version,
                 "used_processed_data": version == "processed",
@@ -731,6 +1059,7 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
                 "n_features": summary.get("n_features"),
                 "import_config": imported.import_config(),
                 "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
+                "preprocessing_summary": summary.get("preprocessing") or {},
                 "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
                 "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
                 "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
@@ -800,7 +1129,8 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
                 random_state=int(validation.get("random_state", 42)),
                 model_params=payload.model_params,
                 metadata_extra={
-                    "dataset_id": payload.dataset_id,
+                    "dataset_id": imported.metadata.get("saved_dataset_id") or payload.dataset_id,
+                    "runtime_dataset_id": payload.dataset_id,
                     "dataset_version": version,
                     "used_processed_data": version == "processed",
                     "target_name": imported.target_name,
@@ -862,7 +1192,7 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             "run_id": run_id,
             "run_type": "comparison",
             "dataset_id": payload.dataset_id,
-            "dataset_name": ";".join(imported.source_files[:3]),
+            "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
             "used_processed_data": version == "processed",
             "target_name": imported.target_name,
             "target_type": summary.get("target_type"),
@@ -936,7 +1266,7 @@ def _save_single_model_run(
             "run_id": run_id,
             "run_type": "single_model",
             "dataset_id": payload.dataset_id,
-            "dataset_name": ";".join(imported.source_files[:3]),
+            "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
             "used_processed_data": version == "processed",
             "target_name": imported.target_name,
             "target_type": summary.get("target_type"),

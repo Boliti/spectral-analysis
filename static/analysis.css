@@ -841,6 +841,53 @@ button:hover,
     gap: 10px;
 }
 
+.target-candidates-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 10px;
+}
+
+.target-candidate-card {
+    text-align: left;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    background: var(--surface);
+    color: var(--text);
+    display: grid;
+    gap: 5px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.target-candidate-card.is-active {
+    border-color: var(--primary);
+    border-width: 2px;
+    background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+}
+
+.target-candidate-card small,
+.target-candidate-card span {
+    color: var(--muted);
+}
+
+.target-candidate-warning {
+    color: var(--warning-text);
+    font-size: 0.82rem;
+}
+
+.dataset-name-cell {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.source-files-details ul {
+    margin: 8px 0 0;
+    padding-left: 18px;
+}
+
 .analysis-task-card,
 .analysis-method-card,
 .analysis-method-pill {

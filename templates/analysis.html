@@ -139,6 +139,10 @@
                 <option value="long_table" disabled>Длинный формат (планируется)</option>
             </select>
             <p id="dataset-auto-note" class="muted">Сначала нажмите «Предпросмотр»: система предложит подходящий тип и заполнит найденные поля.</p>
+            <section class="subcard" id="target-candidates-card" style="display:none;">
+                <h4>Возможные target-переменные</h4>
+                <div id="target-candidates-list" class="target-candidates-list"></div>
+            </section>
 
             <details id="dataset-advanced-settings">
                 <summary>Показать расширенные настройки</summary>
@@ -185,7 +189,7 @@
                         <span class="field-hint">Для TXT/CSV обычно вторая числовая колонка: #Intensity.</span>
                         <input id="dataset-y-column" class="input-field" type="text" value="#Intensity">
                     </label>
-                    <label class="dataset-field" data-visible-for="excel_rows excel_columns txt_folder">Target-источник
+                    <label class="dataset-field hidden-control" data-visible-for="excel_rows excel_columns txt_folder">Target-источник
                         <span class="field-hint">Откуда брать классы/целевые значения.</span>
                         <select id="dataset-target-source" class="input-field">
                             <option value="column">Колонка таблицы</option>
@@ -477,11 +481,18 @@
             </div>
             <div id="preprocessing-plot" class="plot-box"></div>
         </section>
-
-        <section class="card" style="display:none;">
-            <h3>Результат импорта</h3>
-            <div class="result-note">Import result is shown in the dataset-ready block above.</div>
-            <div id="dataset-plot" class="plot-box"></div>
+        <section class="card" id="saved-datasets-card">
+            <h3>Сохранённые датасеты</h3>
+            <div class="line-controls wrap">
+                <input id="save-dataset-name" class="input-field" type="text" placeholder="Название датасета">
+                <select id="save-dataset-version" class="input-field">
+                    <option value="raw">raw</option>
+                    <option value="processed">processed</option>
+                </select>
+                <button id="save-dataset-btn" class="btn btn-primary" type="button">Сохранить текущий датасет</button>
+                <button id="refresh-saved-datasets-btn" class="btn" type="button">Обновить список</button>
+            </div>
+            <div id="saved-datasets-list" class="models-list"></div>
         </section>
     </section>
 
@@ -491,6 +502,10 @@
         <section class="card">
             <h3>Источник данных</h3>
             <div id="active-dataset-badge" class="loaded-badge loaded-badge--empty">Импортированный датасет не выбран. Можно загрузить файл вручную.</div>
+            <div class="line-controls wrap">
+                <button id="choose-other-dataset-btn" class="btn btn-secondary" type="button">Выбрать другой датасет</button>
+                <button id="use-saved-dataset-btn" class="btn" type="button">Использовать сохранённый датасет</button>
+            </div>
             <div class="line-controls" id="manual-train-upload-row">
                 <input id="train-file" type="file" accept=".csv,.txt,.esp,.xlsx,.xls">
                 <button id="preview-btn" class="btn btn-primary">Проверить файл</button>
@@ -501,7 +516,6 @@
 
         <section class="card">
             <h3>Настройки анализа</h3>
-            <div id="analysis-step-guide" class="analysis-wizard"></div>
             <div class="line-controls wrap analysis-mode-controls">
                 <label>Режим настройки
                     <select id="model-config-mode" class="input-field">
@@ -509,7 +523,7 @@
                         <option value="advanced">Расширенный режим</option>
                     </select>
                 </label>
-                <label class="analysis-legacy-goal">Цель анализа
+                <label class="analysis-legacy-goal hidden-control">Цель анализа
                     <select id="analysis-goal" class="input-field">
                         <option value="explore">Визуально изучить структуру данных</option>
                         <option value="classify">Классифицировать спектры</option>
@@ -521,116 +535,128 @@
                 </label>
             </div>
             <p id="target-source-note" class="loaded-badge loaded-badge--ok" style="display:none;"></p>
-            <p id="auto-model-note" class="muted">Параметры будут подобраны автоматически. Их можно изменить в расширенных настройках.</p>
-            <div id="analysis-run-summary" class="analysis-run-summary"></div>
-            <div class="grid model-advanced-field">
-                <label class="analysis-legacy-model-type">Тип модели
-                    <select id="model-type" class="input-field">
-                        <option value="pca">PCA</option>
-                        <option value="plsda">PLS-DA (классификация)</option>
-                        <option value="pls">PLS Regression</option>
-                        <option value="svm">SVM (классификация)</option>
-                        <option value="random_forest">Random Forest</option>
-                        <option value="decision_tree">Decision Tree</option>
-                        <option value="kmeans">k-means</option>
-                        <option value="hca">HCA</option>
-                        <option value="svr">SVR</option>
-                        <option value="compare_classification">Сравнить классификаторы</option>
-                        <option value="compare_regression">Сравнить регрессоры</option>
-                        <option value="compare_clustering">Сравнить кластеризацию</option>
-                    </select>
-                </label>
-                <label class="analysis-optional-model-name">Название модели
-                    <input id="model-name" class="input-field" type="text" placeholder="Например, pca_plasma_batch_01">
-                </label>
-                <label data-model-param="n_components">Число компонент
-                    <span class="field-hint">Сколько латентных компонент использовать.</span>
-                    <input id="n-components" class="input-field" type="number" min="1" placeholder="2">
-                </label>
-                <label data-model-param="n_clusters">Число кластеров
-                    <span class="field-hint">Сколько групп нужно найти.</span>
-                    <input id="model-n-clusters" class="input-field" type="number" min="2" value="2">
-                </label>
-                <label data-model-param="kernel">Ядро модели
-                    <select id="model-kernel" class="input-field">
-                        <option value="rbf">rbf</option>
-                        <option value="linear">linear</option>
-                        <option value="poly">poly</option>
-                        <option value="sigmoid">sigmoid</option>
-                    </select>
-                </label>
-                <label data-model-param="C">C
-                    <span class="field-hint">Сила регуляризации.</span>
-                    <input id="model-c" class="input-field" type="number" min="0.01" step="0.1" value="1.0">
-                </label>
-                <label data-model-param="gamma">gamma
-                    <span class="field-hint">Параметр ядра для RBF.</span>
-                    <input id="model-gamma" class="input-field" type="text" value="scale">
-                </label>
-                <label data-model-param="epsilon">epsilon
-                    <input id="model-epsilon" class="input-field" type="number" min="0" step="0.05" value="0.1">
-                </label>
-                <label data-model-param="n_estimators">Число деревьев
-                    <input id="model-n-estimators" class="input-field" type="number" min="1" step="10" value="200">
-                </label>
-                <label data-model-param="max_depth">Максимальная глубина
-                    <input id="model-max-depth" class="input-field" type="number" min="1" placeholder="без ограничения">
-                </label>
-                <label data-model-param="class_weight">Вес классов
-                    <select id="model-class-weight" class="input-field">
-                        <option value="">нет</option>
-                        <option value="balanced">balanced</option>
-                    </select>
-                </label>
-                <label data-model-param="linkage">Способ объединения
-                    <select id="model-linkage" class="input-field">
-                        <option value="ward">ward</option>
-                        <option value="complete">complete</option>
-                        <option value="average">average</option>
-                        <option value="single">single</option>
-                    </select>
-                </label>
-                <label data-model-param="standardize_cluster">
-                    <span>Стандартизировать признаки перед кластеризацией</span>
-                    <span class="field-hint">Для k-means и HCA это включено по умолчанию, чтобы признаки с большим масштабом не доминировали.</span>
-                    <input id="model-standardize-cluster" type="checkbox" checked disabled>
-                </label>
-            </div>
+            <div id="analysis-step-guide" class="analysis-wizard"></div>
 
-            <label id="targets-wrap" class="model-advanced-field">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
-                <textarea id="target-values" class="input-field" rows="3" placeholder="0,0,0,1,1,1"></textarea>
-            </label>
-            <div class="line-controls wrap model-advanced-field" id="targets-import-wrap">
-                <input id="targets-file" type="file" accept=".txt,.csv">
-                <button id="load-targets-btn" class="btn">Подставить targets в поле</button>
-                <span id="targets-file-hint" class="muted"></span>
-            </div>
+            <section class="analysis-section analysis-section--compact">
+                <h4>3. Параметры метода</h4>
+                <div id="method-params-simple" class="analysis-next-step"></div>
+                <div id="method-params-fields" class="grid model-advanced-field">
+                    <label class="analysis-legacy-model-type hidden-control">Тип модели
+                        <select id="model-type" class="input-field">
+                            <option value="pca">PCA</option>
+                            <option value="plsda">PLS-DA (классификация)</option>
+                            <option value="pls">PLS Regression</option>
+                            <option value="svm">SVM (классификация)</option>
+                            <option value="random_forest">Random Forest</option>
+                            <option value="decision_tree">Decision Tree</option>
+                            <option value="kmeans">k-means</option>
+                            <option value="hca">HCA</option>
+                            <option value="svr">SVR</option>
+                            <option value="compare_classification">Сравнить классификаторы</option>
+                            <option value="compare_regression">Сравнить регрессоры</option>
+                            <option value="compare_clustering">Сравнить кластеризацию</option>
+                        </select>
+                    </label>
+                    <label data-model-param="n_components">Число компонент
+                        <span class="field-hint">Сколько латентных компонент использовать.</span>
+                        <input id="n-components" class="input-field" type="number" min="1" placeholder="2">
+                    </label>
+                    <label data-model-param="n_clusters">Число кластеров
+                        <span class="field-hint">Сколько групп нужно найти.</span>
+                        <input id="model-n-clusters" class="input-field" type="number" min="2" value="2">
+                    </label>
+                    <label data-model-param="kernel">Ядро модели
+                        <select id="model-kernel" class="input-field">
+                            <option value="rbf">rbf</option>
+                            <option value="linear">linear</option>
+                            <option value="poly">poly</option>
+                            <option value="sigmoid">sigmoid</option>
+                        </select>
+                    </label>
+                    <label data-model-param="C">C
+                        <span class="field-hint">Сила регуляризации.</span>
+                        <input id="model-c" class="input-field" type="number" min="0.01" step="0.1" value="1.0">
+                    </label>
+                    <label data-model-param="gamma">gamma
+                        <span class="field-hint">Параметр ядра для RBF.</span>
+                        <input id="model-gamma" class="input-field" type="text" value="scale">
+                    </label>
+                    <label data-model-param="epsilon">epsilon
+                        <input id="model-epsilon" class="input-field" type="number" min="0" step="0.05" value="0.1">
+                    </label>
+                    <label data-model-param="n_estimators">Число деревьев
+                        <input id="model-n-estimators" class="input-field" type="number" min="1" step="10" value="200">
+                    </label>
+                    <label data-model-param="max_depth">Максимальная глубина
+                        <input id="model-max-depth" class="input-field" type="number" min="1" placeholder="без ограничения">
+                    </label>
+                    <label data-model-param="linkage">Способ объединения
+                        <select id="model-linkage" class="input-field">
+                            <option value="ward">ward</option>
+                            <option value="complete">complete</option>
+                            <option value="average">average</option>
+                            <option value="single">single</option>
+                        </select>
+                    </label>
+                    <label data-model-param="standardize_cluster">
+                        <span>Стандартизировать признаки перед кластеризацией</span>
+                        <span class="field-hint">Для k-means и HCA это включено по умолчанию, чтобы признаки с большим масштабом не доминировали.</span>
+                        <input id="model-standardize-cluster" type="checkbox" checked disabled>
+                    </label>
+                    <label data-model-param="random_state">random_state
+                        <input id="random-state" class="input-field" type="number" step="1" value="42">
+                    </label>
+                    <label data-model-param="class_weight" class="hidden-control">Вес классов
+                        <select id="model-class-weight" class="input-field">
+                            <option value="">нет</option>
+                            <option value="balanced">balanced</option>
+                        </select>
+                    </label>
+                </div>
+            </section>
 
-            <div class="grid model-advanced-field">
+            <section class="analysis-section analysis-section--compact">
+                <h4>4. Обучение и сохранение</h4>
+                <label id="targets-wrap" class="model-advanced-field">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
+                    <textarea id="target-values" class="input-field" rows="3" placeholder="0,0,0,1,1,1"></textarea>
+                </label>
+                <div class="line-controls wrap model-advanced-field" id="targets-import-wrap">
+                    <input id="targets-file" type="file" accept=".txt,.csv">
+                    <button id="load-targets-btn" class="btn">Подставить targets в поле</button>
+                    <span id="targets-file-hint" class="muted"></span>
+                </div>
+
+            <div class="grid">
+                <label>Название модели
+                    <input id="model-name" class="input-field" type="text" placeholder="Например, plsda_plasma_batch_01">
+                </label>
                 <label>Какие данные использовать
                     <select id="train-dataset-version" class="input-field">
                         <option value="raw">Исходный датасет</option>
                         <option value="processed" disabled>Предобработанный датасет</option>
                     </select>
                 </label>
-                <label data-model-param="validation">Валидация
+                <label>Валидация
                     <select id="do-validation" class="input-field">
                         <option value="true">Включена (train/test)</option>
                         <option value="false">Выключена</option>
                     </select>
                 </label>
-                <label data-model-param="test_size">Доля тестовой выборки (0.1 - 0.5)
+                <label>Доля тестовой выборки (0.1 - 0.5)
                     <input id="test-size" class="input-field" type="number" min="0.1" max="0.5" step="0.05" value="0.3">
                 </label>
-                <label data-model-param="random_state">Случайное зерно
-                    <input id="random-state" class="input-field" type="number" step="1" value="42">
+                <label>
+                    <span>Сохранить модель после обучения</span>
+                    <input id="save-model-after-training" type="checkbox" checked disabled>
                 </label>
             </div>
 
+            <div id="analysis-run-summary" class="analysis-run-summary"></div>
             <div class="line-controls wrap analysis-run-actions">
                 <button id="train-btn" class="btn btn-primary">Запустить анализ</button>
                 <button id="compare-methods-btn" class="btn btn-secondary" type="button" style="display:none;">Сравнить методы</button>
             </div>
+            </section>
         </section>
     </section>
 

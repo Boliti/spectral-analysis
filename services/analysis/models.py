@@ -272,8 +272,7 @@ class PLSDAClassifier(BaseAnalysisModel):
             "classes": self.encoder.classes_.tolist(),
             "decision_scores": score_table,
             "decision_score": max_scores.astype(float).tolist(),
-            "confidence": [f"score={float(value):.4g}; вероятность недоступна" for value in max_scores],
-            "confidence": [f"score={float(value):.4g}; вероятность недоступна для данной модели" for value in max_scores],
+            "confidence": [f"score={float(value):.4g}; вероятность недоступна для PLS-DA" for value in max_scores],
             "confidence_kind": "decision_score",
             "probability_available": False,
         }
