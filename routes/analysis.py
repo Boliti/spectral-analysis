@@ -1161,18 +1161,35 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             )
             metrics = trained.get("metrics") or {}
             saved_model = trained.get("saved_model") or {}
+            row_warnings = list(trained.get("warnings") or [])
+            if normalized_type == "compare_classification":
+                cm = metrics.get("confusion_matrix")
+                cm_accuracy = metrics.get("confusion_matrix_accuracy")
+                if cm is None:
+                    row_warnings.append("Validation/test confusion_matrix is unavailable; full-dataset confusion_matrix was not used.")
+                elif metrics.get("accuracy") is not None and cm_accuracy is not None and abs(float(metrics["accuracy"]) - float(cm_accuracy)) > 1e-6:
+                    row_warnings.append("confusion_matrix_accuracy differs from accuracy.")
             row = {
                 "method": method,
                 "status": "success",
                 "model_id": saved_model.get("model_id"),
                 "model_type": saved_model.get("model_type"),
                 "metrics": metrics,
-                "confusion_matrix": metrics.get("confusion_matrix") or trained.get("result", {}).get("confusion_matrix"),
+                "confusion_matrix": metrics.get("confusion_matrix"),
+                "classes": metrics.get("classes"),
+                "y_true": metrics.get("y_true"),
+                "y_pred": metrics.get("y_pred"),
+                "train_samples": metrics.get("train_samples"),
+                "test_samples": metrics.get("test_samples"),
+                "validation_mode": metrics.get("validation_mode"),
+                "confusion_matrix_total": metrics.get("confusion_matrix_total"),
+                "confusion_matrix_accuracy": metrics.get("confusion_matrix_accuracy"),
                 "params": saved_model.get("model_params") or saved_model.get("params") or {},
-                "warnings": trained.get("warnings") or [],
+                "warnings": row_warnings,
                 "plot": trained.get("plot") or {},
                 **metrics,
             }
+            row["warnings"] = row_warnings
             rows.append(row)
             saved_models.append(saved_model)
         except Exception as exc:

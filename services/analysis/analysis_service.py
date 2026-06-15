@@ -151,6 +151,7 @@ class AnalysisService:
         warnings = []
         if isinstance(validation, dict):
             warnings.extend(validation.get("warnings", []) or [])
+        warnings.extend(metrics.get("warnings", []) or [])
         warnings.extend(result.get("warnings", []) or [])
 
         timestamp_name = _timestamp_name()
@@ -202,7 +203,17 @@ class AnalysisService:
         metadata["preprocessing_applied"] = bool(metadata.get("used_processed_data"))
 
         saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata)
-        plots = self._build_plots(model.model_type, result, phase="training", dataset=dataset)
+        plot_source = result
+        if task_type == "classification":
+            validation_classes = validation.get("classes") if isinstance(validation, dict) else []
+            plot_source = {
+                "confusion_matrix": metrics.get("confusion_matrix"),
+                "classes": metrics.get("classes") or validation_classes,
+                "y_pred": metrics.get("y_pred") or [],
+                "y_true": metrics.get("y_true") or [],
+                "sample_ids": [],
+            }
+        plots = self._build_plots(model.model_type, plot_source, phase="training", dataset=dataset)
         plot = plots[0] if plots else {}
         prediction_rows = self._training_prediction_rows(result, dataset.sample_names)
 
@@ -300,12 +311,59 @@ class AnalysisService:
     def _extract_metrics(self, model_type: str, result: Dict[str, Any], validation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         normalized = self._normalize_model_type(model_type)
         if isinstance(validation, dict) and validation.get("status") == "ok" and isinstance(validation.get("metrics"), dict):
-            return validation["metrics"]
+            metrics = dict(validation["metrics"])
+            if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
+                cm = validation.get("confusion_matrix")
+                cm_accuracy = self._confusion_matrix_accuracy(cm)
+                metrics.update(
+                    {
+                        "confusion_matrix": cm,
+                        "classes": validation.get("classes"),
+                        "y_true": validation.get("y_true"),
+                        "y_pred": validation.get("y_pred"),
+                        "train_samples": validation.get("train_samples"),
+                        "test_samples": validation.get("test_samples"),
+                        "validation_mode": validation.get("mode"),
+                        "confusion_matrix_total": self._confusion_matrix_total(cm),
+                        "confusion_matrix_accuracy": cm_accuracy,
+                    }
+                )
+                warnings = list(validation.get("warnings") or [])
+                if cm is None:
+                    warnings.append("Validation confusion_matrix is unavailable; no full-dataset confusion_matrix fallback was used.")
+                elif metrics.get("accuracy") is not None and cm_accuracy is not None and abs(float(metrics["accuracy"]) - cm_accuracy) > 1e-6:
+                    warnings.append("Validation confusion_matrix_accuracy differs from accuracy.")
+                if warnings:
+                    metrics["warnings"] = warnings
+            else:
+                metrics.update(
+                    {
+                        "train_samples": validation.get("train_samples"),
+                        "test_samples": validation.get("test_samples"),
+                        "validation_mode": validation.get("mode"),
+                    }
+                )
+            return metrics
         if normalized == "pca":
             ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
             return {"explained_variance_ratio": ratios, "explained_variance_total": float(sum(ratios))}
         if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
-            return {key: result.get(key) for key in ["accuracy", "precision_macro", "recall_macro", "f1_macro", "confusion_matrix"] if key in result}
+            metrics = {key: result.get(key) for key in ["accuracy", "precision_macro", "recall_macro", "f1_macro"] if key in result}
+            metrics.update(
+                {
+                    "confusion_matrix": None,
+                    "classes": result.get("classes"),
+                    "y_true": None,
+                    "y_pred": None,
+                    "train_samples": None,
+                    "test_samples": None,
+                    "validation_mode": validation.get("status") if isinstance(validation, dict) else "unavailable",
+                    "confusion_matrix_total": None,
+                    "confusion_matrix_accuracy": None,
+                    "warnings": ["Validation/test confusion_matrix is unavailable; full-dataset confusion_matrix was not used."],
+                }
+            )
+            return metrics
         if normalized in {"pls", "svr"}:
             return {key: result.get(key) for key in ["r2", "mae", "rmse"] if key in result}
         if normalized in {"kmeans", "hca"}:
@@ -322,6 +380,27 @@ class AnalysisService:
                 if key in result
             }
         return {}
+
+    @staticmethod
+    def _confusion_matrix_total(matrix: Any) -> Optional[int]:
+        if matrix is None:
+            return None
+        arr = np.asarray(matrix, dtype=float)
+        if arr.size == 0:
+            return 0
+        return int(np.sum(arr))
+
+    @staticmethod
+    def _confusion_matrix_accuracy(matrix: Any) -> Optional[float]:
+        if matrix is None:
+            return None
+        arr = np.asarray(matrix, dtype=float)
+        if arr.ndim != 2 or arr.size == 0:
+            return None
+        total = float(np.sum(arr))
+        if total <= 0:
+            return None
+        return float(np.trace(arr) / total)
 
     def _run_validation(
         self,
@@ -447,12 +526,25 @@ class AnalysisService:
         y_pred_cls = np.asarray(eval_model.predict(x_test), dtype=str)
         labels = sorted(np.unique(np.concatenate([y_true_cls, y_pred_cls])).tolist())
         cm = confusion_matrix(y_true_cls, y_pred_cls, labels=labels)
+        cm_total = self._confusion_matrix_total(cm)
+        cm_accuracy = self._confusion_matrix_accuracy(cm)
         validation_metrics = {
             "accuracy": float(accuracy_score(y_true_cls, y_pred_cls)),
             "precision_macro": float(precision_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
             "recall_macro": float(recall_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
             "f1_macro": float(f1_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
+            "confusion_matrix": cm.tolist(),
+            "classes": labels,
+            "y_true": y_true_cls.tolist(),
+            "y_pred": y_pred_cls.tolist(),
+            "train_samples": int(len(x_train)),
+            "test_samples": int(len(x_test)),
+            "validation_mode": "holdout_classification",
+            "confusion_matrix_total": cm_total,
+            "confusion_matrix_accuracy": cm_accuracy,
         }
+        if cm_accuracy is not None and abs(validation_metrics["accuracy"] - cm_accuracy) > 1e-6:
+            warnings.append("Validation confusion_matrix_accuracy differs from accuracy")
         kfold = self._kfold_validation(
             model_type=model_type,
             x=x,
@@ -1196,6 +1288,8 @@ class AnalysisService:
             return {}
 
         if normalized in {"plsda", "svm", "random_forest", "decision_tree"}:
+            if phase == "training" and result.get("confusion_matrix"):
+                return self._confusion_matrix_plot(result.get("confusion_matrix"), result.get("classes") or [], f"{normalized}: confusion matrix")
             labels = result.get("y_pred") if phase == "training" else result.get("predicted_classes")
             if not labels:
                 return {}
