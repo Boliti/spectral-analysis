@@ -85,7 +85,20 @@ class AnalysisRunManager:
         row["run_type"] = base.get("run_type")
         row["dataset_id"] = base.get("dataset_id")
         row["dataset_name"] = base.get("dataset_name")
-        row["dataset_version"] = base.get("dataset_version")
+        # Determine dataset_version with inference logic
+        dataset_version = base.get("dataset_version")
+        if dataset_version is None:
+            # Try to infer from summary.version
+            summary = base.get("summary") or {}
+            dataset_version = summary.get("version")
+        if dataset_version is None:
+            # Infer from used_processed_data
+            used_processed = base.get("used_processed_data")
+            if used_processed is True:
+                dataset_version = "processed"
+            elif used_processed is False:
+                dataset_version = "raw"
+        row["dataset_version"] = dataset_version
         row["used_processed_data"] = base.get("used_processed_data")
         row["target_name"] = base.get("target_name")
         row["target_type"] = base.get("target_type")
@@ -150,8 +163,6 @@ class AnalysisRunManager:
             except Exception:
                 row["confusion_matrix_accuracy"] = None
 
-        if row["dataset_version"] is None:
-            row["warnings"].append("dataset_version отсутствует")
         if row["used_processed_data"] is None:
             row["warnings"].append("used_processed_data отсутствует")
         if row["confusion_matrix_total"] is not None and row["test_samples"] is not None and int(row["confusion_matrix_total"]) != int(row["test_samples"]):
