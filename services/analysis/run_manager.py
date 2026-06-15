@@ -89,8 +89,9 @@ class AnalysisRunManager:
         dataset_version = base.get("dataset_version")
         if dataset_version is None:
             # Try to infer from summary.version
-            summary = base.get("summary") or {}
-            dataset_version = summary.get("version")
+            summary = base.get("summary")
+            if isinstance(summary, dict):
+                dataset_version = summary.get("version")
         if dataset_version is None:
             # Infer from used_processed_data
             used_processed = base.get("used_processed_data")
