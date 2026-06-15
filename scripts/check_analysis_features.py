@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -13,8 +15,37 @@ sys.path.insert(0, str(ROOT))
 from app import app
 
 
+def authenticate_test_user(client: TestClient) -> str:
+    """Create a throwaway user and keep its session cookie in TestClient."""
+    username = f"analysis_check_{os.getpid()}_{int(time.time() * 1000)}"
+    password = "analysis-check-password"
+
+    register_response = client.post(
+        "/register",
+        data={
+            "username": username,
+            "password": password,
+            "confirm_password": password,
+        },
+        follow_redirects=False,
+    )
+    assert register_response.status_code == 303, register_response.text
+
+    login_response = client.post(
+        "/login",
+        data={"username": username, "password": password},
+        follow_redirects=False,
+    )
+    assert login_response.status_code == 303, login_response.text
+
+    analysis_response = client.get("/analysis", follow_redirects=False)
+    assert analysis_response.status_code == 200, analysis_response.text
+    return username
+
+
 def main() -> None:
     client = TestClient(app)
+    username = authenticate_test_user(client)
     content = "sample_id,target,source_sheet,source_file,400,410,420,430,440,450,460,470\n"
     for idx in range(12):
         group = "A" if idx < 6 else "B"
@@ -60,6 +91,7 @@ def main() -> None:
     print(
         json.dumps(
             {
+                "username": username,
                 "dataset_id": dataset_id,
                 "run_id": run_id,
                 "snr": summary["snr"],

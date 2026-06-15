@@ -153,16 +153,16 @@ const LAYOUT_LABELS = {
 const TARGET_SOURCE_OPTIONS = {
     excel_rows: [
         ["column", "Колонка таблицы"],
-        ["none", "Без target"],
+        ["none", "Без целевой переменной"],
     ],
     excel_columns: [
         ["sheet_name", "Имя листа Excel"],
         ["file_name", "Имя файла"],
         ["manual", "Один общий класс"],
-        ["none", "Без target"],
+        ["none", "Без целевой переменной"],
     ],
     txt_folder: [
-        ["none", "Без target"],
+        ["none", "Без целевой переменной"],
         ["folder_name", "Имя папки"],
         ["filename_regex", "Regex из имени файла"],
         ["file_name", "Имя файла"],
@@ -659,13 +659,13 @@ function updateTargetVisibility() {
     }
     if (targetSourceNote) {
         targetSourceNote.style.display = importedTarget ? "block" : "none";
-        targetSourceNote.textContent = importedTarget ? `Target будет взят из датасета: ${importedTarget}` : "";
+        targetSourceNote.textContent = importedTarget ? `Целевая переменная будет взята из датасета: ${importedTarget}` : "";
     }
     if (importedTarget && previewResult) {
         const distribution = importedDatasetSummary?.class_distribution || {};
         if (previewResult) previewResult.textContent = [
-            `Target будет взят из импортированного датасета: ${importedTarget}`,
-            `Тип target: ${importedDatasetSummary?.target_type || "н/д"}`,
+            `Целевая переменная будет взята из импортированного датасета: ${importedTarget}`,
+            `Тип целевой переменной: ${importedDatasetSummary?.target_type || "н/д"}`,
             `Распределение:\n${Object.entries(distribution).map(([k, v]) => `${k} — ${v}`).join("\n") || "н/д"}`,
         ].join("\n");
     }
@@ -683,11 +683,11 @@ function updateModelAvailability() {
         let reason = "";
         if (classificationTypes.includes(option.value)) {
             disabled = !hasTarget || targetType !== "categorical";
-            reason = "Для классификации нужен categorical target.";
+            reason = "Для классификации нужна категориальная целевая переменная.";
         }
         if (regressionTypes.includes(option.value)) {
             disabled = !hasTarget || targetType !== "numeric";
-            reason = "Для регрессии нужен numeric target.";
+            reason = "Для регрессии нужна числовая целевая переменная.";
         }
         option.disabled = disabled;
         option.title = disabled ? reason : "";
@@ -698,7 +698,7 @@ function updateModelAvailability() {
         selectedAnalysisMethod = "pca";
     }
     if (previewResult && activeDatasetId && targetType === "none") {
-        previewResult.textContent = "Target отсутствует. Для классификации или регрессии нужен target; сейчас доступны PCA и кластеризация.";
+        previewResult.textContent = "Целевая переменная отсутствует. Для классификации или регрессии нужна целевая переменная; сейчас доступны PCA и кластеризация.";
     }
 }
 
@@ -749,21 +749,21 @@ function autoTuneModelParams() {
     let modelType = "pca";
     if (goal === "classify") {
         modelType = targetType === "categorical" ? "plsda" : "pca";
-        if (targetType !== "categorical") showToast("В датасете не задан категориальный target. Для классификации выберите target или стратегию извлечения класса.", "warning");
+        if (targetType !== "categorical") showToast("В датасете не задана категориальная целевая переменная. Для классификации выберите целевую переменную или стратегию извлечения класса.", "warning");
     }
     if (goal === "compare") {
         if (targetType === "categorical") modelType = "compare_classification";
         else if (targetType === "numeric") modelType = "compare_regression";
         else {
             modelType = "pca";
-            showToast("Для сравнения моделей с target нужен target. Сейчас доступны PCA и кластеризация.", "warning");
+            showToast("Для сравнения моделей с целевой переменной нужна целевая переменная. Сейчас доступны PCA и кластеризация.", "warning");
         }
     }
     if (goal === "compare_regression") modelType = targetType === "numeric" ? "compare_regression" : "pca";
     if (goal === "cluster") modelType = "kmeans";
     if (goal === "regress") {
         modelType = targetType === "numeric" ? "pls" : "pca";
-        if (targetType !== "numeric") showToast("Для регрессии нужен числовой target.", "warning");
+        if (targetType !== "numeric") showToast("Для регрессии нужна числовая целевая переменная.", "warning");
     }
     modelTypeInput.value = modelType;
     selectedAnalysisTask = goalForModelType(modelType);
@@ -940,22 +940,22 @@ function renderValidationBlock(validation) {
         const num = typeof val === "number" ? val.toFixed(4) : String(val);
         validationSummary.appendChild(metricCard(key, num));
     });
-    validationSummary.appendChild(metricCard("train_samples", validation.train_samples));
-    validationSummary.appendChild(metricCard("test_samples", validation.test_samples));
+        validationSummary.appendChild(metricCard("обучающих спектров", validation.train_samples));
+    validationSummary.appendChild(metricCard("тестовых спектров", validation.test_samples));
 
     const kfold = validation.kfold;
     if (kfold && kfold.status === "ok" && kfold.mean_std) {
         Object.entries(kfold.mean_std).forEach(([metricName, stats]) => {
-            validationSummary.appendChild(metricCard(`kfold ${metricName} mean`, Number(stats.mean).toFixed(4)));
-            validationSummary.appendChild(metricCard(`kfold ${metricName} std`, Number(stats.std).toFixed(4)));
+            validationSummary.appendChild(metricCard(`k-fold ${metricName}: среднее`, Number(stats.mean).toFixed(4)));
+            validationSummary.appendChild(metricCard(`k-fold ${metricName}: std`, Number(stats.std).toFixed(4)));
         });
     }
 
     const permutation = validation.permutation_test;
     if (permutation && permutation.status === "ok") {
-        validationSummary.appendChild(metricCard("perm metric", permutation.metric));
-        validationSummary.appendChild(metricCard("perm observed", Number(permutation.observed_score).toFixed(4)));
-        validationSummary.appendChild(metricCard("perm p-value", Number(permutation.p_value).toFixed(4)));
+        validationSummary.appendChild(metricCard("перестановочный тест: метрика", permutation.metric));
+        validationSummary.appendChild(metricCard("перестановочный тест: значение", Number(permutation.observed_score).toFixed(4)));
+        validationSummary.appendChild(metricCard("перестановочный тест: p-value", Number(permutation.p_value).toFixed(4)));
     }
 
     const bootstrap = validation.bootstrap_ci;
@@ -990,9 +990,9 @@ function renderValidationBlock(validation) {
                 },
             ],
             {
-                title: "Confusion Matrix (test)",
-                xaxis: { title: "Predicted class" },
-                yaxis: { title: "True class" },
+                title: "Матрица ошибок (test)",
+                xaxis: { title: "Предсказанный класс" },
+                yaxis: { title: "Истинный класс" },
             },
             plotConfig
         );
@@ -1082,9 +1082,9 @@ function inferenceReportText(payload = {}) {
     return [
         `Модель: ${meta.model_name || meta.model_id || payload.model_id || "н/д"}`,
         `Тип модели: ${meta.model_type || payload.model_type || "н/д"}`,
-        `Обучающий dataset: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
+        `Обучающий датасет: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
         `Версия данных: ${meta.dataset_version || (meta.used_processed_data ? "processed" : "raw")}`,
-        `Предобработка: baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`,
+        `Предобработка: базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`,
         `Ожидаемые признаки: ${first.expected_feature_count || meta.expected_feature_count || meta.feature_count || "н/д"}`,
         `Признаки во входном файле: ${first.input_feature_count || "н/д"}`,
         `Признаки после подготовки: ${first.prepared_feature_count || "н/д"}`,
@@ -1098,7 +1098,7 @@ function renderPredictionsTable(payload) {
     if (!comparisonResult) return;
     lastPredictionRows = collectPredictionRows(payload);
     if (!lastPredictionRows.length) {
-        comparisonResult.innerHTML = "<p class=\"muted\">Модель выполнена, но явные predictions в ответе не найдены. Подробности доступны в JSON.</p>";
+        comparisonResult.innerHTML = "<p class=\"muted\">Модель выполнена, но явные предсказания в ответе не найдены. Подробности доступны в JSON.</p>";
         return;
     }
     const counts = {};
@@ -1177,12 +1177,12 @@ function renderStructuredResult(payload, mode) {
                 "Анализ завершён.",
                 `метод: ${payload.model_type || saved.model_type || "н/д"}`,
                 `задача: ${payload.task_type || "н/д"}`,
-                `dataset_id: ${payload.dataset_id || activeDatasetId || "н/д"}`,
+                `id датасета: ${payload.dataset_id || activeDatasetId || "н/д"}`,
                 `версия данных: ${payload.dataset_version || (trainDatasetVersionInput?.value || "raw")}`,
-                `target: ${importedDatasetSummary?.target_name || payload.target_name || "н/д"}`,
-                `статус: ${payload.status || "success"}`,
+                `целевая переменная: ${importedDatasetSummary?.target_name || payload.target_name || "н/д"}`,
+                `статус: ${payload.status || "успешно"}`,
                 `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
-                `run_id: ${payload.run_id || payload.run?.run_id || "н/д"}`,
+                `id запуска: ${payload.run_id || payload.run?.run_id || "н/д"}`,
                 `Модель сохранена: ${saved.model_id || "unknown"} (${saved.model_type || "n/a"}).`,
                 "",
                 buildResultInterpretation(payload),
@@ -1204,8 +1204,8 @@ function renderStructuredResult(payload, mode) {
     if (mode === "infer") {
         const meta = payload.model_metadata || {};
         const filesCount = Array.isArray(payload.batch_results) ? payload.batch_results.length : 1;
-        if (resultExplainer) resultExplainer.textContent = `Инференс выполнен.\nМодель: ${meta.model_id || "n/a"} (${meta.model_type || "n/a"})\nОбработано файлов: ${filesCount}`;
-        if (resultExplainer) resultExplainer.textContent = `Инференс выполнен.\n${inferenceReportText(payload)}\nОбработано файлов: ${filesCount}`;
+        if (resultExplainer) resultExplainer.textContent = `Применение модели выполнено.\nМодель: ${meta.model_id || "н/д"} (${meta.model_type || "н/д"})\nОбработано файлов: ${filesCount}`;
+        if (resultExplainer) resultExplainer.textContent = `Применение модели выполнено.\n${inferenceReportText(payload)}\nОбработано файлов: ${filesCount}`;
         renderInferenceExplanation(payload);
         renderPredictionsTable(payload);
         updateResultDownloads(lastRenderedRunId);
@@ -1224,7 +1224,7 @@ function buildResultInterpretation(payload = {}) {
         return [
             "Как понимать результат:",
             `PCA показывает главные направления изменчивости спектров${typeof variance === "number" ? `; первые компоненты объясняют ${(variance * 100).toFixed(1)}% дисперсии.` : "."}`,
-            "Если точки на PC1-PC2 образуют отдельные группы, в спектрах есть выраженная структура. Если группы перемешаны, различия слабые или требуют моделей с target.",
+            "Если точки на PC1-PC2 образуют отдельные группы, в спектрах есть выраженная структура. Если группы перемешаны, различия слабые или требуют моделей с целевой переменной.",
         ].join("\n");
     }
     if (["kmeans", "hca"].includes(model) || task === "clustering") {
@@ -1237,7 +1237,7 @@ function buildResultInterpretation(payload = {}) {
             silhouette !== undefined && silhouette !== null
                 ? `Silhouette score = ${Number(silhouette).toFixed(4)}. Значения ближе к 1 означают более выраженное разделение, около 0 — перекрытие кластеров.`
                 : "Silhouette score не рассчитан: вероятно, кластеров слишком мало или структура не подходит для метрики.",
-            inertia !== undefined ? `Inertia = ${Number(inertia).toFixed(4)}. Её удобно сравнивать между разными значениями n_clusters.` : "",
+            inertia !== undefined ? `Inertia = ${Number(inertia).toFixed(4)}. Её удобно сравнивать между разными значениями числа кластеров.` : "",
             "Для физической интерпретации сравните средние спектры кластеров и распределение ширины щели/решётки по кластерам.",
         ].filter(Boolean).join("\n");
     }
@@ -1247,7 +1247,7 @@ function buildResultInterpretation(payload = {}) {
             "Как понимать результат:",
             f1 !== undefined ? `F1-score macro = ${Number(f1).toFixed(4)}.` : "Основные метрики смотрите в таблице.",
             "F1-score macro удобен при сравнении классов, потому что учитывает баланс precision и recall по каждому классу.",
-            "Confusion matrix показывает, где модель путает реальные классы с предсказанными.",
+            "Матрица ошибок показывает, где модель путает реальные классы с предсказанными.",
         ].join("\n");
     }
     if (["pls", "svr"].includes(model) || task === "regression") {
@@ -1255,7 +1255,7 @@ function buildResultInterpretation(payload = {}) {
         const rmse = metrics.rmse;
         return [
             "Как понимать результат:",
-            r2 !== undefined ? `R² = ${Number(r2).toFixed(4)}.` : "R² показывает долю объяснённой изменчивости target.",
+            r2 !== undefined ? `R² = ${Number(r2).toFixed(4)}.` : "R² показывает долю объяснённой изменчивости целевой переменной.",
             rmse !== undefined ? `RMSE = ${Number(rmse).toFixed(4)}.` : "",
             "Чем ближе точки к диагонали на графике истинных и предсказанных значений, тем точнее модель. График остатков помогает увидеть систематические ошибки.",
         ].filter(Boolean).join("\n");
@@ -1281,11 +1281,11 @@ function appendRegressionPredictionsTable(predictions) {
     `).join("");
     comparisonResult.insertAdjacentHTML("beforeend", `
         <div class="line-controls wrap" style="margin-top:12px;">
-            <button type="button" class="btn" data-download-predictions-csv>Скачать predictions CSV</button>
-            <button type="button" class="btn" data-download-result-json>Скачать result JSON</button>
+            <button type="button" class="btn" data-download-predictions-csv>Скачать предсказания CSV</button>
+            <button type="button" class="btn" data-download-result-json>Скачать результат JSON</button>
         </div>
         <table class="comparison-table compact-table">
-            <thead><tr><th>sample_id</th><th>y_true</th><th>y_pred</th><th>residual</th></tr></thead>
+            <thead><tr><th>Образец</th><th>Истинное значение</th><th>Предсказанное значение</th><th>Остаток</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
         </table>
     `);
@@ -1306,12 +1306,12 @@ function renderComparisonResult(payload) {
         resultExplainer.textContent = [
             "Сравнение методов завершено.",
             `метод: ${best || "сравнение"}`,
-            `задача: ${payload.task_type || run.run_type || "comparison"}`,
-            `dataset_id: ${payload.dataset_id || run.dataset_id || activeDatasetId || "н/д"}`,
-            `run_id: ${payload.run_id || run.run_id || "н/д"}`,
+            `задача: ${payload.task_type || run.run_type || "сравнение"}`,
+            `id датасета: ${payload.dataset_id || run.dataset_id || activeDatasetId || "н/д"}`,
+            `id запуска: ${payload.run_id || run.run_id || "н/д"}`,
             `версия данных: ${payload.dataset_version || (run.used_processed_data ? "processed" : "raw")}`,
-            `target: ${run.target_name || payload.summary?.target_name || "н/д"}`,
-            `статус: ${payload.status || run.status || "success"}`,
+            `целевая переменная: ${run.target_name || payload.summary?.target_name || "н/д"}`,
+            `статус: ${payload.status || run.status || "успешно"}`,
             `лучшая модель: ${best || "н/д"}`,
             `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
             "",
@@ -1400,7 +1400,7 @@ function metricHelpText(keys = []) {
     if (keys.includes("silhouette_score")) lines.push("Silhouette score показывает отделимость кластеров: ближе к 1 — лучше, около 0 — кластеры перекрываются.");
     if (keys.includes("inertia")) lines.push("Inertia — суммарная внутрикластерная ошибка; её полезно сравнивать при разных n_clusters.");
     if (keys.includes("r2")) lines.push("R² показывает качество аппроксимации: чем ближе к 1, тем лучше.");
-    if (keys.includes("rmse")) lines.push("RMSE показывает типичный масштаб ошибки прогноза в единицах target.");
+    if (keys.includes("rmse")) lines.push("RMSE показывает типичный масштаб ошибки прогноза в единицах целевой переменной.");
     return escapeHtml(lines.join(" "));
 }
 
@@ -1481,7 +1481,7 @@ function getSelectedSampleIds(dataset, linesCount = "5", selectionStrategy = "ba
     if (strategy === "balanced_by_class" && spectra.some((item) => item.target !== null && item.target !== undefined)) {
         const groups = {};
         spectra.forEach((item) => {
-            const key = String(item.target ?? "без target");
+            const key = String(item.target ?? "без целевой переменной");
             groups[key] = groups[key] || [];
             groups[key].push(item);
         });
@@ -1511,7 +1511,7 @@ function buildRawTraces(dataset, sampleIds = []) {
         mode: "lines",
         name: item.target ? `${item.sample_id} [${item.target}]` : item.sample_id,
         legendgroup: String(item.target || item.sample_id),
-        hovertemplate: "sample_id: %{text}<br>x: %{x}<br>интенсивность: %{y}<extra></extra>",
+        hovertemplate: "id образца: %{text}<br>x: %{x}<br>интенсивность: %{y}<extra></extra>",
         text: item.sample_id,
     }));
 }
@@ -1530,7 +1530,7 @@ function buildProcessedTraces(dataset, sampleIds = []) {
 }
 
 function buildBeforeAfterTraces(dataset, sampleIds = []) {
-    const raw = buildRawTraces(dataset, sampleIds).map((trace) => ({ ...trace, name: `${trace.name} raw`, opacity: 0.55 }));
+    const raw = buildRawTraces(dataset, sampleIds).map((trace) => ({ ...trace, name: `${trace.name} исходный`, opacity: 0.55 }));
     const processed = buildProcessedTraces(dataset, sampleIds).map((trace) => ({ ...trace, name: `${trace.name}`, line: { dash: "dash" } }));
     return [...raw, ...processed];
 }
@@ -1540,7 +1540,7 @@ function buildClassMeanTraces(dataset, source = "raw") {
     const axis = source === "processed" ? (dataset?.axis_processed || dataset?.axis || []) : (dataset?.axis_raw || dataset?.axis || []);
     const groups = {};
     spectra.forEach((item) => {
-        const key = String(item.target || "без target");
+        const key = String(item.target || "без целевой переменной");
         const values = source === "processed" ? (item.processed || getSpectrumY(item)) : (item.raw || getSpectrumY(item));
         groups[key] = groups[key] || [];
         groups[key].push(values.map(Number));
@@ -1742,7 +1742,7 @@ async function importStandardDataset() {
     try {
         const formData = new FormData();
         formData.append("file", file);
-        setGlobalStatus("Загрузка правильного датасета...", "Файл приводится к внутреннему формату X + axis + target.", 20);
+        setGlobalStatus("Загрузка правильного датасета...", "Файл приводится к внутреннему формату: матрица X, спектральная ось и целевая переменная.", 20);
         const response = await fetchWithTimeout("/analysis/dataset/import-standard", { method: "POST", body: formData });
         const data = await responseJsonOrError(response, "Не удалось выполнить предобработку.");
         if (!response.ok || data.status === "error") throw new Error(humanError(data, "Не удалось загрузить правильный датасет."));
@@ -1763,10 +1763,10 @@ async function importStandardDataset() {
         if (standardDatasetResult) {
             standardDatasetResult.textContent = [
                 "Правильный датасет загружен.",
-                `dataset_id: ${data.dataset_id}`,
+                `id датасета: ${data.dataset_id}`,
                 `спектров: ${data.summary?.n_samples}`,
                 `признаков: ${data.summary?.n_features}`,
-                `target: ${data.summary?.target_name || "нет"}`,
+                `целевая переменная: ${data.summary?.target_name || "нет"}`,
             ].join("\n");
         }
         clearGlobalStatus("Датасет готов.");
@@ -1875,7 +1875,7 @@ function ensureTargetSourceOption(value, label = value) {
 function targetTypeLabel(type) {
     if (type === "numeric") return "числовой";
     if (type === "categorical") return "категориальный";
-    if (type === "none") return "без target";
+    if (type === "none") return "без целевой переменной";
     return type || "н/д";
 }
 
@@ -1895,7 +1895,7 @@ function targetCandidateText(candidate) {
 
 function candidateSourceLabel(candidate) {
     const labels = {
-        none: "Без target",
+        none: "Без целевой переменной",
         sheet_name: "Имя листа Excel",
         folder_name: "Имя папки",
         column: "Колонка таблицы",
@@ -1937,7 +1937,7 @@ function renderTargetCandidates(candidates = []) {
         const warning = candidate.warning ? `<div class="target-candidate-warning">${escapeHtml(candidate.warning)}</div>` : "";
         return `
             <button type="button" class="target-candidate-card ${selected ? "is-active" : ""}" data-target-candidate-index="${index}">
-                <strong>${escapeHtml(candidate.label || candidate.name || "Без target")}</strong>
+                <strong>${escapeHtml(candidate.label || candidate.name || "Без целевой переменной")}</strong>
                 <span>${escapeHtml(targetTypeLabel(candidate.target_type))} · ${escapeHtml(candidateSourceLabel(candidate))}</span>
                 <small>${escapeHtml(targetCandidateText(candidate))}</small>
                 ${warning}
@@ -1978,7 +1978,7 @@ function updateDatasetLayoutUI() {
 
     updateDatasetLayoutCards();
     if (layout === "txt_folder" && targetSource === "file_name") {
-        showToast("Каждый файл может образовать отдельный класс. Такой target непригоден для классификации; лучше выбрать 'Без target' или regex для группировки.", "warning");
+        showToast("Каждый файл может образовать отдельный класс. Такая целевая переменная непригодна для классификации; лучше выбрать «Без целевой переменной» или regex для группировки.", "warning");
     }
     renderImportCheckSummary();
 }
@@ -2048,13 +2048,13 @@ function renderDatasetPreview(payload) {
         lines.push("Листы Excel:");
         payload.excel.sheets.forEach((sheet) => {
             lines.push(`- ${sheet.name}: строк ${sheet.rows}, колонок ${sheet.columns.length}; ${sheet.recommendation || sheet.sheet_role || ""}`);
-            if (sheet.numeric_target_candidates?.length) lines.push(`  numeric target: ${sheet.numeric_target_candidates.join(", ")}`);
-            if (sheet.class_target_candidates?.length) lines.push(`  target для классификации: ${sheet.class_target_candidates.join(", ")}`);
+            if (sheet.numeric_target_candidates?.length) lines.push(`  числовая целевая переменная: ${sheet.numeric_target_candidates.join(", ")}`);
+            if (sheet.class_target_candidates?.length) lines.push(`  целевая переменная для классификации: ${sheet.class_target_candidates.join(", ")}`);
         });
     }
     if (payload.zip) {
         lines.push(`Спектральных файлов в ZIP: ${payload.zip.spectral_file_count}`);
-        lines.push("Target: не задан по умолчанию");
+        lines.push("Целевая переменная по умолчанию не задана");
         lines.push("Датасет подходит для: PCA, k-means, HCA, анализ параметров спектрометра");
         lines.push("Имена файлов будут сохранены как sample_id/source_file");
         const detected = detectedMeasurementCards({ metadata: { ...(payload.zip.metadata || {}), sample_metadata_preview: payload.zip.sample_metadata_preview || [] } });
@@ -2092,14 +2092,14 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
         lines.push(`- диапазон оси: ${formatNumber(validationSummary.axis_min)}-${formatNumber(validationSummary.axis_max)}`);
         if (layout === "excel_rows") {
             lines.push(`- ID-колонка: ${datasetIdColumnInput.value || "не выбрана"}`);
-            lines.push(`- target-колонка: ${validationSummary.target_name || "без target"}`);
+            lines.push(`- колонка целевой переменной: ${validationSummary.target_name || "без целевой переменной"}`);
         }
         if (validationSummary.target_name && Object.keys(distribution).length) {
             lines.push("- классы:");
             Object.entries(distribution).slice(0, 12).forEach(([cls, count]) => lines.push(`  ${cls} — ${count}`));
             if (Object.keys(distribution).length > 12) lines.push(`  ... ещё ${Object.keys(distribution).length - 12}`);
         } else {
-            lines.push("- Target: не задан");
+            lines.push("- целевая переменная: не задана");
             lines.push("- Рекомендуемые задачи: PCA, кластеризация, анализ параметров спектрометра");
         }
         const detected = detectedMeasurementCards(validationSummary);
@@ -2114,7 +2114,7 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
         lines.push(`- строк на выбранном листе: ${sheet?.rows ?? "н/д"}`);
         lines.push(`- спектральных признаков: ${stats?.featureCount ?? "н/д"}`);
         lines.push(`- ID-колонка: ${stats?.idColumn || "не найдена"}`);
-        lines.push(`- target-колонка: ${stats?.targetColumn || "без target"}`);
+        lines.push(`- колонка целевой переменной: ${stats?.targetColumn || "без целевой переменной"}`);
     } else if (datasetPreviewPayload?.excel?.sheets && layout === "excel_columns") {
         const selectedSheets = selectedSheetNames();
         const sheet = firstExcelSheetPreview();
@@ -2126,20 +2126,20 @@ function renderImportCheckSummary(validationSummary = null, warnings = []) {
         lines.push(`- файлов спектров в ZIP: ${datasetPreviewPayload.zip.spectral_file_count}`);
         const targetSource = datasetTargetSourceInput?.value || "none";
         if (targetSource === "none") {
-            lines.push("- Target: не задан");
+            lines.push("- целевая переменная: не задана");
             lines.push("- Доступны PCA, k-means, HCA и анализ параметров спектрометра");
         } else if (targetSource.startsWith("metadata:")) {
             const field = targetSource.split(":")[1];
             const candidate = (datasetPreviewPayload?.target_candidates || []).find((item) => item.source === targetSource);
-            lines.push(`- target: ${field}`);
+            lines.push(`- целевая переменная: ${field}`);
             if (candidate) lines.push(`- задача: ${candidate.recommended_task}; уникальных значений: ${candidate.unique_count}`);
         } else if (targetSource === "file_name") {
-            lines.push("- target: имя файла");
+            lines.push("- целевая переменная: имя файла");
             lines.push("- предупреждение: каждый файл может образовать отдельный класс; для классификации это непригодно");
         } else if (targetSource === "filename_regex") {
-            lines.push(`- target: regex ${datasetTargetRegexInput?.value || "не задан"}`);
+            lines.push(`- целевая переменная: regex ${datasetTargetRegexInput?.value || "не задан"}`);
         } else {
-            lines.push(`- target: ${targetSource}`);
+            lines.push(`- целевая переменная: ${targetSource}`);
         }
         const detected = detectedMeasurementCards({ metadata: { ...(datasetPreviewPayload.zip.metadata || {}), sample_metadata_preview: datasetPreviewPayload.zip.sample_metadata_preview || [] } });
         if (detected.length) {
@@ -2260,13 +2260,13 @@ function renderDatasetSummary(summary) {
     const distribution = summary.class_distribution || {};
     const distributionLines = Object.keys(distribution).length
         ? Object.entries(distribution).map(([cls, count]) => `${cls} — ${count}`).join("\n")
-        : "target не задан";
+        : "целевая переменная не задана";
     const targetDetails = !summary.target_name
-        ? "Target не задан. Доступны PCA, k-means, HCA и анализ параметров спектрометра."
+        ? "Целевая переменная не задана. Доступны PCA, k-means, HCA и анализ параметров спектрометра."
         : summary.target_type === "numeric"
         ? [
-            `Тип target: numeric`,
-            `Диапазон target: ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}`,
+            `Тип целевой переменной: числовая`,
+            `Диапазон целевой переменной: ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}`,
             `Уникальных уровней: ${summary.target_unique_count ?? "н/д"}`,
             Object.keys(distribution).length ? `Распределение уровней:\n${distributionLines}` : "",
             `Задача: регрессия`,
@@ -2287,14 +2287,14 @@ function renderDatasetSummary(summary) {
         : (detectedMeasurementLines || "не указаны");
     renderDetectedMeasurementSummary(summary);
     datasetSummaryEl.textContent = [
-        `dataset_id: ${summary.dataset_id || importedDatasetId || "ещё не сохранён"}`,
+        `id датасета: ${summary.dataset_id || importedDatasetId || "ещё не сохранён"}`,
         `Версия: ${summary.version || "raw"}`,
         `Выбранные листы: ${(summary.selected_sheets || []).join(", ") || "н/д"}`,
         `Режим листов: ${summary.sheet_mode || "н/д"}`,
         `Спектров: ${summary.n_samples}`,
         `Спектральных точек: ${summary.n_features}`,
         `Диапазон оси: ${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`,
-        `Target: ${summary.target_name || "нет"}`,
+        `Целевая переменная: ${summary.target_name || "нет"}`,
         targetDetails,
         `NaN/Inf: ${summary.nan_count ?? 0}`,
         `Пропуски: ${formatPercent(summary.missing_fraction || 0)}`,
@@ -2304,7 +2304,7 @@ function renderDatasetSummary(summary) {
         `Технический статус: ${summary.technical_status || "н/д"}`,
         summary.technical_warnings?.length ? `Технические предупреждения:\n- ${summary.technical_warnings.join("\n- ")}` : "",
         `Параметры измерений:\n${measurementLines}`,
-        `Первые sample_id: ${(summary.sample_ids_preview || []).join(", ")}`,
+        `Первые id образцов: ${(summary.sample_ids_preview || []).join(", ")}`,
         `Источник: ${humanLayout(summary.source_layout)}`,
     ].join("\n");
 }
@@ -2340,23 +2340,23 @@ function renderDatasetReady(summary) {
     const distribution = summary.class_distribution || {};
     const classes = Object.keys(distribution).length
         ? Object.entries(distribution).map(([cls, count]) => `${cls} — ${count}`).join(", ")
-        : "нет target";
+        : "нет целевой переменной";
     const targetInfo = summary.target_type === "numeric"
-        ? `numeric, ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}, уровней: ${summary.target_unique_count ?? "н/д"}`
+        ? `числовая, ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}, уровней: ${summary.target_unique_count ?? "н/д"}`
         : classes;
     const tiles = [
         ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д", "dataset"],
         ["Спектров", summary.n_samples, "count"],
         ["Признаков", summary.n_features, "count"],
-        ["Target", summary.target_name || "нет", summary.target_name ? "target" : "warning"],
-        [summary.target_type === "numeric" ? "Тип target" : "Классы", targetInfo, "classes"],
+        ["Целевая переменная", summary.target_name || "нет", summary.target_name ? "target" : "warning"],
+        [summary.target_type === "numeric" ? "Тип целевой переменной" : "Классы", targetInfo, "classes"],
         ["Задача", summary.task_recommendation || "н/д", "task"],
         ["Диапазон", `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`, "range"],
         ["NaN/Inf", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
         ["Статус", summary.technical_status || "ok", summary.technical_status === "ok" || !summary.technical_status ? "success" : "warning"],
     ];
     const technical = [
-        `dataset_id: ${summary.dataset_id || importedDatasetId || "н/д"}`,
+        `id датасета: ${summary.dataset_id || importedDatasetId || "н/д"}`,
         `Выбранные листы: ${(summary.selected_sheets || []).join(", ") || "н/д"}`,
         `Режим: ${summary.sheet_mode || "н/д"}`,
         `SNR средний/мин/макс: ${formatNumber(summary.snr?.mean)} / ${formatNumber(summary.snr?.min)} / ${formatNumber(summary.snr?.max)}`,
@@ -2404,12 +2404,12 @@ function renderAnalysisRecommendations(summary) {
         ? [
             `Найдена числовая целевая переменная: ${summary.target_name}.`,
             "По умолчанию используется как концентрация / регрессия.",
-            summary.alternative_targets?.length ? `Альтернативный target для классификации: ${summary.alternative_targets.map((item) => item.name).join(", ")}.` : "",
+            summary.alternative_targets?.length ? `Альтернативная целевая переменная для классификации: ${summary.alternative_targets.map((item) => item.name).join(", ")}.` : "",
             `Диапазон: ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}; уникальных уровней: ${summary.target_unique_count ?? "н/д"}.`,
         ].filter(Boolean).join("\n")
         : summary.target_name
-        ? `Для текущего датасета найден target: ${summary.target_name}. Классы/значения: ${Object.entries(distribution).map(([k, v]) => `${k} — ${v}`).join(", ") || "не указаны"}.`
-        : "Target не задан. Рекомендуются методы разведочного анализа без учителя.";
+        ? `Для текущего датасета найдена целевая переменная: ${summary.target_name}. Классы/значения: ${Object.entries(distribution).map(([k, v]) => `${k} — ${v}`).join(", ") || "не указаны"}.`
+        : "Целевая переменная не задана. Рекомендуются методы разведочного анализа без учителя.";
     const lines = [targetLine, "", "Рекомендуемые методы:"];
     const buttons = [];
     recommendations.forEach((item, idx) => {
@@ -2426,12 +2426,12 @@ const ANALYSIS_METHOD_INFO = {
     pca: ["PCA", "Сжимает спектры до нескольких главных компонент.", "Для визуального поиска групп, выбросов и общей структуры."],
     kmeans: ["k-means", "Делит спектры на заданное число кластеров.", "Для поиска групп без заранее заданных классов."],
     hca: ["HCA", "Строит иерархическую структуру сходства спектров.", "Для просмотра вложенных групп и близости образцов."],
-    plsda: ["PLS-DA", "Классифицирует спектры через латентные переменные.", "Для категориального target и сравнения классов."],
+    plsda: ["PLS-DA", "Классифицирует спектры через латентные переменные.", "Для категориальной целевой переменной и сравнения классов."],
     svm: ["SVM", "Классифицирует спектры в пространстве высокой размерности.", "Для устойчивого разделения сложных классов."],
     random_forest: ["Random Forest", "Использует ансамбль деревьев решений.", "Для устойчивой классификации и сравнения с линейными методами."],
     decision_tree: ["Decision Tree", "Строит простую интерпретируемую модель.", "Для быстрой базовой проверки."],
     pls: ["PLS Regression", "Прогнозирует числовой параметр по спектру.", "Для концентраций и других количественных величин."],
-    svr: ["SVR", "Выполняет регрессию методом опорных векторов.", "Для нелинейной зависимости спектра и числового target."],
+    svr: ["SVR", "Выполняет регрессию методом опорных векторов.", "Для нелинейной зависимости спектра и числовой целевой переменной."],
     compare_classification: ["Сравнить классификаторы", "Запускает несколько классификаторов.", "Для выбора лучшего метода по метрикам."],
     compare_regression: ["Сравнить регрессоры", "Запускает несколько регрессионных моделей.", "Для сравнения качества прогноза."],
     compare_clustering: ["Сравнить кластеризацию", "Сравнивает варианты кластеризации.", "Для подбора числа групп и метода."],
@@ -2473,7 +2473,7 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
             methods: "PLS-DA, SVM, Random Forest, Decision Tree",
             description: "Обучить модель относить спектры к заданным классам.",
             enabled: categoricalTarget,
-            disabledReason: "Нужен категориальный target.",
+            disabledReason: "Нужна категориальная целевая переменная.",
         },
         {
             goal: "regress",
@@ -2482,16 +2482,16 @@ function analysisTaskDefinitions(summary = importedDatasetSummary) {
             methods: "PLS Regression, SVR",
             description: "Предсказать числовой параметр, например концентрацию.",
             enabled: numericTarget,
-            disabledReason: "Нужен числовой target.",
+            disabledReason: "Нужна числовая целевая переменная.",
         },
         {
             goal: "compare",
             title: "Сравнение методов",
             selectTitle: "Сравнить методы",
-            methods: categoricalTarget ? "классификаторы" : numericTarget ? "регрессионные модели" : "нужен target",
+            methods: categoricalTarget ? "классификаторы" : numericTarget ? "регрессионные модели" : "нужна целевая переменная",
             description: "Запустить несколько моделей и сравнить их по метрикам.",
             enabled: categoricalTarget || numericTarget,
-            disabledReason: "Для сравнения моделей с target нужен target.",
+            disabledReason: "Для сравнения моделей с целевой переменной нужна целевая переменная.",
         },
     ];
 }
@@ -2639,7 +2639,7 @@ function renderAnalysisWorkflowGuide(summary = importedDatasetSummary) {
                 <span class="method-use">${escapeHtml(usage)}</span>
             </button>
         `;
-    }).join("") : `<div class="analysis-empty-note">Для выбранной задачи сейчас нет доступных методов: проверьте target в датасете.</div>`;
+    }).join("") : `<div class="analysis-empty-note">Для выбранной задачи сейчас нет доступных методов: проверьте целевую переменную в датасете.</div>`;
     analysisStepGuide.innerHTML = `
         <section class="analysis-section analysis-section--compact">
             <h4>1. Что сделать?</h4>
@@ -2680,7 +2680,7 @@ function renderAnalysisRunSummary() {
     const parts = [
         `Будет запущено: ${task?.title || "задача"}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
         `данные: ${datasetVersion}`,
-        `target: ${targetName}`,
+        `целевая переменная: ${targetName}`,
     ];
     parts.push(`параметры: ${methodParamsText(modelType)}`);
     const summaryText = parts.join(" · ");
@@ -2733,6 +2733,15 @@ function versionBadge(version = "raw") {
 
 function statusBadge(status = "success") {
     const safeStatus = String(status || "success");
+    const labels = {
+        success: "успешно",
+        ok: "готово",
+        warning: "предупреждение",
+        error: "ошибка",
+        failed: "ошибка",
+        running: "выполняется",
+        pending: "ожидает",
+    };
     const normalized = /fail|error|ошиб/i.test(safeStatus)
         ? "error"
         : /warn|пред/i.test(safeStatus)
@@ -2740,7 +2749,7 @@ function statusBadge(status = "success") {
             : /run|process|pending|вып/i.test(safeStatus)
                 ? "info"
                 : "success";
-    return `<span class="ui-badge ui-badge--${normalized}">${escapeHtml(safeStatus)}</span>`;
+    return `<span class="ui-badge ui-badge--${normalized}">${escapeHtml(labels[safeStatus] || safeStatus)}</span>`;
 }
 
 function metricBadge(text) {
@@ -2841,10 +2850,10 @@ async function validateDatasetImport(fromPreview = false) {
 async function importDataset() {
     const doneBusy = setBusy(datasetImportBtn, "Импорт...");
     try {
-        setGlobalStatus("Данные приводятся к единому формату...", "Формируется матрица спектров и target-значения.", 15);
+        setGlobalStatus("Данные приводятся к единому формату...", "Формируется матрица спектров и значения целевой переменной.", 15);
         datasetValidationResult.textContent = "Импортирую датасет...";
         const response = await fetchWithTimeout("/analysis/dataset/import", { method: "POST", body: configFormData() });
-        setGlobalStatus("Формирование summary...", "Сервер проверяет полученный датасет.", 75);
+        setGlobalStatus("Формирование сводки...", "Сервер проверяет полученный датасет.", 75);
         const data = await response.json();
         if (!response.ok) throw new Error(humanError(data, "Не удалось импортировать датасет."));
         if (data.status === "error") {
@@ -2890,7 +2899,7 @@ async function downloadImportConfig() {
         const response = await fetch(`/analysis/dataset/${importedDatasetId}/config`);
         const data = await response.json();
         if (!response.ok) {
-            alert(data.detail || "Не удалось скачать config JSON");
+            alert(data.detail || "Не удалось скачать JSON конфигурации");
             return;
         }
         const blob = new Blob([JSON.stringify(data.import_config || {}, null, 2)], { type: "application/json" });
@@ -2982,7 +2991,7 @@ async function refreshSavedDatasets() {
         }).join("");
         savedDatasetsList.innerHTML = `
             <table class="compact-table">
-                <thead><tr><th>Название</th><th>Версия</th><th>Спектров</th><th>Признаков</th><th>Target</th><th>Классы</th><th>Предобработка</th><th>Дата</th><th>Действия</th></tr></thead>
+                <thead><tr><th>Название</th><th>Версия</th><th>Спектров</th><th>Признаков</th><th>Целевая переменная</th><th>Классы</th><th>Предобработка</th><th>Дата</th><th>Действия</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         `;
@@ -3080,7 +3089,7 @@ async function downloadPreprocessingConfig() {
     const response = await fetch(`/analysis/dataset/${importedDatasetId}/preprocessing-config`);
     const data = await response.json();
     if (!response.ok) {
-        alert(data.detail || "Не удалось скачать preprocessing JSON");
+        alert(data.detail || "Не удалось скачать JSON предобработки");
         return;
     }
     const blob = new Blob([JSON.stringify(data.preprocessing_config || {}, null, 2)], { type: "application/json" });
@@ -3125,7 +3134,7 @@ function useImportedDatasetForTraining() {
     previewResult.textContent = "Для обучения будет использован импортированный датасет. Повторно загружать файл не нужно.";
     if (standardApplyPreprocessingInput?.checked && trainDatasetVersionInput) {
         trainDatasetVersionInput.value = processedDatasetReady ? "processed" : "raw";
-        if (!processedDatasetReady) showToast("warning", "Стандартная предобработка ещё не применена. Для обучения выбран raw dataset.");
+        if (!processedDatasetReady) showToast("warning", "Стандартная предобработка ещё не применена. Для обучения выбран исходный датасет.");
     }
 }
 
@@ -3509,7 +3518,7 @@ function viewNormalize(values) {
 function classMeanTraces(payload, source) {
     const grouped = {};
     (payload.spectra || []).forEach((item) => {
-        const key = item.target || "без target";
+        const key = item.target || "без целевой переменной";
         grouped[key] = grouped[key] || [];
         grouped[key].push(item[source]);
     });
@@ -3540,17 +3549,17 @@ function renderPreprocessingPlot(payload = lastPreprocessingPreview) {
 
     if (showMode === "class_means") {
         buildClassMeanTraces(payload, "raw").forEach((trace) => {
-            traces.push({ ...trace, y: scale === "view_normalized" ? viewNormalize(trace.y) : trace.y, name: `${trace.name} raw` });
+            traces.push({ ...trace, y: scale === "view_normalized" ? viewNormalize(trace.y) : trace.y, name: `${trace.name} исходный` });
         });
         if (payload.axis_processed && payload.spectra?.some((item) => item.processed)) {
             buildClassMeanTraces(payload, "processed").forEach((trace) => {
-                traces.push({ ...trace, y: scale === "view_normalized" ? viewNormalize(trace.y) : trace.y, name: `${trace.name} processed`, line: { dash: "dash" } });
+                traces.push({ ...trace, y: scale === "view_normalized" ? viewNormalize(trace.y) : trace.y, name: `${trace.name} обработанный`, line: { dash: "dash" } });
             });
         }
         layout.title = "Предобработка: средние спектры по классам";
     } else if (showMode === "raw_only") {
         spectra.forEach((item) => {
-            traces.push({ x: payload.axis_raw, y: scale === "view_normalized" ? viewNormalize(item.raw) : item.raw, type: "scatter", mode: "lines", name: `${item.sample_id} raw` });
+            traces.push({ x: payload.axis_raw, y: scale === "view_normalized" ? viewNormalize(item.raw) : item.raw, type: "scatter", mode: "lines", name: `${item.sample_id} исходный` });
         });
         layout.title = "Исходные спектры";
     } else if (showMode === "processed_only") {
@@ -3559,7 +3568,7 @@ function renderPreprocessingPlot(payload = lastPreprocessingPreview) {
             return;
         }
         spectra.forEach((item) => {
-            traces.push({ x: payload.axis_processed, y: scale === "view_normalized" ? viewNormalize(item.processed) : item.processed, type: "scatter", mode: "lines", name: `${item.sample_id} processed` });
+            traces.push({ x: payload.axis_processed, y: scale === "view_normalized" ? viewNormalize(item.processed) : item.processed, type: "scatter", mode: "lines", name: `${item.sample_id} обработанный` });
         });
         layout.title = "Обработанные спектры";
     } else {
@@ -3568,8 +3577,8 @@ function renderPreprocessingPlot(payload = lastPreprocessingPreview) {
             return;
         }
         spectra.forEach((item) => {
-            traces.push({ x: payload.axis_raw, y: scale === "view_normalized" ? viewNormalize(item.raw) : item.raw, type: "scatter", mode: "lines", name: `${item.sample_id} raw`, xaxis: "x", yaxis: "y", opacity: 0.65 });
-            traces.push({ x: payload.axis_processed, y: scale === "view_normalized" ? viewNormalize(item.processed) : item.processed, type: "scatter", mode: "lines", name: `${item.sample_id} processed`, xaxis: "x2", yaxis: "y2" });
+            traces.push({ x: payload.axis_raw, y: scale === "view_normalized" ? viewNormalize(item.raw) : item.raw, type: "scatter", mode: "lines", name: `${item.sample_id} исходный`, xaxis: "x", yaxis: "y", opacity: 0.65 });
+            traces.push({ x: payload.axis_processed, y: scale === "view_normalized" ? viewNormalize(item.processed) : item.processed, type: "scatter", mode: "lines", name: `${item.sample_id} обработанный`, xaxis: "x2", yaxis: "y2" });
         });
         layout = {
             title: "Предобработка: до/после",
@@ -3863,7 +3872,7 @@ function normalizeTargetsText(raw) {
 async function loadTargetsFromFile() {
     const file = targetsFileInput.files[0];
     if (!file) {
-        alert("Выберите файл с target-метками (.txt/.csv).");
+        alert("Выберите файл с метками целевой переменной (.txt/.csv).");
         return;
     }
 
@@ -3924,7 +3933,7 @@ async function refreshModels() {
     }).join("");
     modelsList.innerHTML = `
         <table class="compact-table">
-            <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Target</th><th>Метрика</th><th>Датасет</th><th>Версия</th><th>Дата</th><th>Действия</th></tr></thead>
+            <thead><tr><th>Название</th><th>Тип</th><th>Задача</th><th>Целевая переменная</th><th>Метрика</th><th>Датасет</th><th>Версия</th><th>Дата</th><th>Действия</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
     `;
@@ -3971,7 +3980,7 @@ async function refreshRuns() {
         }).join("");
         runsList.innerHTML = `
             <table class="compact-table">
-                <thead><tr><th>Запуск</th><th>Тип</th><th>Метод</th><th>Target</th><th>Результат</th><th>Статус</th><th>Дата</th><th>Действия</th></tr></thead>
+                <thead><tr><th>Запуск</th><th>Тип</th><th>Метод</th><th>Целевая переменная</th><th>Результат</th><th>Статус</th><th>Дата</th><th>Действия</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
         `;
@@ -4108,7 +4117,7 @@ async function loadSelectedModel(modelArg = null) {
 
     const doneBusy = setBusy(document.getElementById("load-model-btn"), "Загрузка...");
     try {
-        setGlobalStatus("Загрузка сохранённой модели...", "Читаем metadata модели.", 25);
+        setGlobalStatus("Загрузка сохранённой модели...", "Читаем метаданные модели.", 25);
         const response = await fetchWithTimeout(`/analysis/models/${model.modelType}/${model.modelId}/load`, { method: "POST" });
         const data = await response.json();
         if (!response.ok) throw new Error(humanError(data, "Не удалось загрузить модель"));
@@ -4137,9 +4146,9 @@ async function openSavedModelMetadata(modelArg = null) {
     try {
         const response = await fetchWithTimeout(`/analysis/models/${model.modelType}/${model.modelId}/load`, { method: "POST" });
         const data = await response.json();
-        if (!response.ok) throw new Error(humanError(data, "Не удалось открыть metadata модели."));
+        if (!response.ok) throw new Error(humanError(data, "Не удалось открыть метаданные модели."));
         renderModelMetadataCard(data.model);
-        showToast("Metadata модели открыта.", "success");
+        showToast("Метаданные модели открыты.", "success");
     } catch (error) {
         showToast("error", error.message);
     }
@@ -4152,16 +4161,16 @@ function modelMetadataText(meta = {}) {
         `название: ${meta.model_name || "н/д"}`,
         `тип: ${meta.model_type || "н/д"}`,
         `задача: ${meta.task_type || "н/д"}`,
-        `run_id: ${meta.run_id || "н/д"}`,
+        `id запуска: ${meta.run_id || "н/д"}`,
         `создана: ${formatDateTime(meta.created_at) || "н/д"}`,
         `датасет: ${meta.dataset_name || meta.dataset_id || "н/д"}${meta.dataset_id ? ` (${shortText(meta.dataset_id, 8)})` : ""}`,
-        `target: ${meta.target_name || "н/д"} (${meta.target_type || "н/д"})`,
+        `целевая переменная: ${meta.target_name || "н/д"} (${meta.target_type || "н/д"})`,
         `метрики: ${JSON.stringify(meta.metrics || {}, null, 2)}`,
         `использовались обработанные данные: ${meta.used_processed_data ? "да" : "нет"}`,
         `классы: ${(meta.classes || []).join(", ") || "н/д"}`,
         `диапазон оси: ${(meta.axis_range || []).join("–") || "н/д"}`,
         `ожидается признаков: ${meta.feature_count || meta.n_features || "н/д"}`,
-        `предобработка: baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`,
+        `предобработка: базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`,
     ].join("\n");
 }
 
@@ -4178,15 +4187,15 @@ function renderModelMetadataCard(meta = {}) {
     const tiles = [
         ["Тип", meta.model_type || "н/д"],
         ["Задача", meta.task_type || "н/д"],
-        ["Target", meta.target_name || "н/д"],
+        ["Целевая переменная", meta.target_name || "н/д"],
         ["Классы", classes || "н/д"],
-        ["Dataset", meta.dataset_name || meta.dataset_id || "н/д"],
-        ["Предобработка", `baseline=${methodLabel(preprocessing.baseline?.method)}, smoothing=${methodLabel(preprocessing.smoothing?.method)}, normalization=${methodLabel(preprocessing.normalization?.method)}`],
+        ["Датасет", meta.dataset_name || meta.dataset_id || "н/д"],
+        ["Предобработка", `базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`],
         ["Ожидается признаков", meta.feature_count || meta.n_features || "н/д"],
         ["Диапазон оси", Array.isArray(meta.axis_range) ? meta.axis_range.join("-") : "н/д"],
     ];
     modelMetadataCard.innerHTML = `
-        <h4>Metadata модели</h4>
+        <h4>Метаданные модели</h4>
         <div class="metadata-grid">
             ${tiles.map(([label, value]) => `
                 <div class="metadata-tile">
@@ -4362,7 +4371,7 @@ function downloadCurrentResultJson() {
 
 function downloadPredictionsCsv() {
     if (!lastPredictionRows.length) {
-        showToast("warning", "Нет predictions для скачивания.");
+        showToast("warning", "Нет предсказаний для скачивания.");
         return;
     }
     downloadTextFile(`predictions_${Date.now()}.csv`, toCsv(lastPredictionRows), "text/csv");
@@ -4576,7 +4585,7 @@ function initAnalysisPage() {
     bindClick("compare-methods-btn", () => {
         const { categoricalTarget, numericTarget } = targetState(importedDatasetSummary);
         if (!categoricalTarget && !numericTarget) {
-            showToast("Для сравнения методов нужен target.", "warning");
+            showToast("Для сравнения методов нужна целевая переменная.", "warning");
             return;
         }
         if (analysisGoalInput) analysisGoalInput.value = "compare";

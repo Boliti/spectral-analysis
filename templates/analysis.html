@@ -25,12 +25,12 @@
         </div>
     </header>
     <nav class="workflow-stepper" aria-label="Этапы анализа">
-        <button type="button" class="workflow-step workflow-tab workflow-tab--active" data-step="import" data-target-section="import-section"><span class="step-index">1</span><span class="step-label">Датасет</span><span class="step-state">active</span></button>
-        <button type="button" class="workflow-step workflow-tab" data-step="check" data-target-section="dataset-ready-card"><span class="step-index">2</span><span class="step-label">Проверка</span><span class="step-state">not-started</span></button>
-        <button type="button" class="workflow-step workflow-tab" data-step="preprocess" data-target-section="preprocessing-card"><span class="step-index">3</span><span class="step-label">Предобработка</span><span class="step-state">not-started</span></button>
-        <button type="button" class="workflow-step workflow-tab" data-step="train" data-target-section="training-section"><span class="step-index">4</span><span class="step-label">Обучение</span><span class="step-state">not-started</span></button>
-        <button type="button" class="workflow-step workflow-tab" data-step="models" data-target-section="models-section"><span class="step-index">5</span><span class="step-label">Модели</span><span class="step-state">not-started</span></button>
-        <button type="button" class="workflow-step workflow-tab" data-step="results" data-target-section="results-section"><span class="step-index">6</span><span class="step-label">Результаты</span><span class="step-state">not-started</span></button>
+        <button type="button" class="workflow-step workflow-tab workflow-tab--active" data-step="import" data-target-section="import-section"><span class="step-index">1</span><span class="step-label">Датасет</span><span class="step-state">активно</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="check" data-target-section="dataset-ready-card"><span class="step-index">2</span><span class="step-label">Проверка</span><span class="step-state">не начато</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="preprocess" data-target-section="preprocessing-card"><span class="step-index">3</span><span class="step-label">Предобработка</span><span class="step-state">не начато</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="train" data-target-section="training-section"><span class="step-index">4</span><span class="step-label">Обучение</span><span class="step-state">не начато</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="models" data-target-section="models-section"><span class="step-index">5</span><span class="step-label">Модели</span><span class="step-state">не начато</span></button>
+        <button type="button" class="workflow-step workflow-tab" data-step="results" data-target-section="results-section"><span class="step-index">6</span><span class="step-label">Результаты</span><span class="step-state">не начато</span></button>
     </nav>
     <div id="global-status" class="global-status" style="display:none;">
         <div class="spinner"></div>
@@ -54,19 +54,19 @@
             <h3>Общий порядок работы</h3>
             <p>Загрузите датасет, проверьте структуру и график, при необходимости примените предобработку, выберите цель анализа, запустите модель, затем посмотрите метрики, графики и скачайте результаты. Все запуски сохраняются в истории текущего пользователя.</p>
             <h3>Режимы работы</h3>
-            <p>Полный сценарий показывает весь процесс. «Правильный датасет» подходит для готового CSV/XLSX. «Только предобработка» нужен для получения processed-версии. «Только обучение» оставляет импорт готового датасета и модели. «Применение сохранённой модели» показывает модели и prediction. «История экспериментов» открывает старые run, ZIP и удаление.</p>
+            <p>Полный сценарий показывает весь процесс. «Правильный датасет» подходит для готового CSV/XLSX. «Только предобработка» нужен для получения обработанной версии. «Только обучение» оставляет импорт готового датасета и модели. «Применение сохранённой модели» показывает модели и предсказания. «История экспериментов» открывает старые запуски, ZIP и удаление.</p>
             <h3>Формат правильного датасета</h3>
             <pre>sample_id | target | source_sheet | source_file | 473.50 | 474.10 | ...</pre>
-            <h3>Target</h3>
-            <p><strong>categorical</strong> — классификация. <strong>numeric</strong> — регрессия концентрации или числового параметра. Если target отсутствует, доступны PCA и кластеризация.</p>
+            <h3>Целевая переменная</h3>
+            <p><strong>Категориальная</strong> — классификация. <strong>Числовая</strong> — регрессия концентрации или числового параметра. Если целевая переменная отсутствует, доступны PCA и кластеризация.</p>
             <h3>Методы</h3>
-            <p>PCA показывает визуальную структуру. PLS-DA, SVM, Random Forest и Decision Tree решают классификацию. k-means и HCA ищут группы без target. PLS Regression и SVR предсказывают числовой target.</p>
+            <p>PCA показывает визуальную структуру. PLS-DA, SVM, Random Forest и Decision Tree решают классификацию. k-means и HCA ищут группы без целевой переменной. PLS Regression и SVR предсказывают числовую целевую переменную.</p>
             <h3>Предобработка</h3>
-            <p>Baseline correction убирает фон, smoothing снижает шум, normalization приводит спектры к сопоставимому масштабу. Raw — исходные данные, processed — сохранённая обработанная версия.</p>
+            <p>Коррекция базовой линии убирает фон, сглаживание снижает шум, нормализация приводит спектры к сопоставимому масштабу. Raw — исходные данные, processed — сохранённая обработанная версия.</p>
             <h3>Результаты</h3>
-            <p>Для классификации выводятся accuracy, precision, recall, F1 и confusion matrix. Для регрессии — R2, RMSE, MAE, график факт/прогноз и остатки.</p>
+            <p>Для классификации выводятся accuracy, precision, recall, F1 и матрица ошибок. Для регрессии — R2, RMSE, MAE, график факт/прогноз и остатки.</p>
             <h3>Частые ошибки</h3>
-            <p>Нет target для supervised-метода, target не того типа, processed dataset ещё не создан, датасет слишком маленький, или новая спектральная сетка не совпадает с сеткой, на которой обучалась модель.</p>
+            <p>Нет целевой переменной для метода с учителем, целевая переменная не того типа, обработанная версия датасета ещё не создана, датасет слишком маленький, или новая спектральная сетка не совпадает с сеткой, на которой обучалась модель.</p>
             <div class="line-controls wrap">
                 <button id="download-example-csv-btn" class="btn" type="button">Скачать пример правильного датасета</button>
                 <button id="download-template-xlsx-btn" class="btn" type="button">Скачать шаблон Excel</button>
@@ -106,7 +106,7 @@
 
         <section class="card">
             <h3>Загрузка и предпросмотр</h3>
-            <p class="block-description">Импортируйте Excel, ZIP/ASC или TXT/CSV, затем проверьте ось, target и первые графики.</p>
+            <p class="block-description">Импортируйте Excel, ZIP/ASC или TXT/CSV, затем проверьте ось, целевую переменную и первые графики.</p>
             <div class="line-controls wrap">
                 <input id="dataset-files" type="file" accept=".xlsx,.xls,.csv,.txt,.esp,.zip" multiple>
                 <button id="dataset-preview-btn" class="btn btn-primary">Предпросмотр</button>
@@ -116,7 +116,7 @@
 
         <section class="card">
             <h3>Структура датасета</h3>
-            <p class="block-description">Выберите формат данных и target-кандидат. Технические настройки спрятаны ниже, чтобы не перегружать основной сценарий.</p>
+            <p class="block-description">Выберите формат данных и кандидат целевой переменной. Технические настройки спрятаны ниже, чтобы не перегружать основной сценарий.</p>
             <div class="layout-cards" id="dataset-layout-cards">
                 <button type="button" class="layout-card" data-layout="excel_rows">
                     <strong>Спектры по строкам</strong>
@@ -142,7 +142,7 @@
             </select>
             <p id="dataset-auto-note" class="muted">Сначала нажмите «Предпросмотр»: система предложит подходящий тип и заполнит найденные поля.</p>
             <section class="subcard" id="target-candidates-card" style="display:none;">
-                <h4>Возможные target-переменные</h4>
+                <h4>Возможные целевые переменные</h4>
                 <div id="target-candidates-list" class="target-candidates-list"></div>
             </section>
 
@@ -175,7 +175,7 @@
                         <span class="field-hint">Колонка, по которой определяется имя или номер образца.</span>
                         <select id="dataset-id-column" class="input-field"></select>
                     </label>
-                    <label class="dataset-field" data-visible-for="excel_rows">Target-колонка
+                    <label class="dataset-field" data-visible-for="excel_rows">Колонка целевой переменной
                         <span class="field-hint">Колонка с классом или значением, которое модель должна предсказывать.</span>
                         <select id="dataset-target-column" class="input-field"></select>
                     </label>
@@ -187,11 +187,11 @@
                         <span class="field-hint">Для TXT/CSV обычно первая числовая колонка: #Wave.</span>
                         <input id="dataset-x-column" class="input-field" type="text" value="#Wave">
                     </label>
-                    <label class="dataset-field" data-visible-for="txt_folder">Intensity-колонка
+                    <label class="dataset-field" data-visible-for="txt_folder">Колонка интенсивности
                         <span class="field-hint">Для TXT/CSV обычно вторая числовая колонка: #Intensity.</span>
                         <input id="dataset-y-column" class="input-field" type="text" value="#Intensity">
                     </label>
-                    <label class="dataset-field hidden-control" data-visible-for="excel_rows excel_columns txt_folder">Target-источник
+                    <label class="dataset-field hidden-control" data-visible-for="excel_rows excel_columns txt_folder">Источник целевой переменной
                         <span class="field-hint">Откуда брать классы/целевые значения.</span>
                         <select id="dataset-target-source" class="input-field">
                             <option value="column">Колонка таблицы</option>
@@ -200,7 +200,7 @@
                             <option value="filename_regex">Regex из имени файла</option>
                             <option value="file_name">Имя файла</option>
                             <option value="manual">Один общий класс</option>
-                            <option value="none">Без target</option>
+                            <option value="none">Без целевой переменной</option>
                         </select>
                     </label>
                     <label class="dataset-field" data-visible-for="txt_folder" data-target-source-field="filename_regex">Regex для класса
@@ -223,7 +223,7 @@
                 </div>
                 <div class="subcard">
                     <h4>Параметры измерений</h4>
-                    <p class="muted">Необязательно. Эти данные сохраняются в metadata датасета, config JSON и metadata модели.</p>
+                    <p class="muted">Необязательно. Эти данные сохраняются в метаданных датасета, JSON конфигурации и метаданных модели.</p>
                     <div id="detected-measurement-summary" class="measurement-detected" style="display:none;"></div>
                     <div class="line-controls wrap">
                         <button id="measurement-manual-toggle-btn" class="btn btn-secondary" type="button">Задать вручную</button>
@@ -233,7 +233,7 @@
                         <label>Ширина входной щели
                             <input id="meta-slit-width" class="input-field" type="text" placeholder="Например, 50 мкм">
                         </label>
-                        <label>Штрихов решётки, lines/mm
+                        <label>Штрихов решётки, линий/мм
                             <input id="meta-grating-lines" class="input-field" type="number" min="1" placeholder="Например, 1200">
                         </label>
                         <label>Длина волны лазера
@@ -298,12 +298,12 @@
                 <summary>Дополнительный экспорт</summary>
                 <div class="line-controls wrap">
                     <button id="dataset-export-zip-btn" class="btn" title="ZIP — полный пакет данных и настроек">Скачать ZIP-пакет</button>
-                    <button id="dataset-export-processed-csv-btn" class="btn" disabled title="Processed CSV — обработанная версия для анализа">Скачать processed CSV</button>
-                    <button id="dataset-export-processed-xlsx-btn" class="btn" disabled title="Processed XLSX — обработанная версия для Excel">Скачать processed XLSX</button>
-                    <button id="dataset-export-processed-zip-btn" class="btn" disabled title="Processed ZIP — обработанные данные и настройки">Скачать processed ZIP</button>
-                    <button id="dataset-metadata-download-btn" class="btn" title="JSON — summary и metadata датасета">Скачать metadata JSON</button>
-                    <button id="dataset-config-download-btn" class="btn" title="JSON — техническая конфигурация импорта">Скачать config JSON</button>
-                    <button id="preprocessing-config-download-btn" class="btn" disabled title="JSON — параметры предобработки">Скачать preprocessing JSON</button>
+                    <button id="dataset-export-processed-csv-btn" class="btn" disabled title="Processed CSV — обработанная версия для анализа">Скачать обработанный CSV</button>
+                    <button id="dataset-export-processed-xlsx-btn" class="btn" disabled title="Processed XLSX — обработанная версия для Excel">Скачать обработанный XLSX</button>
+                    <button id="dataset-export-processed-zip-btn" class="btn" disabled title="Processed ZIP — обработанные данные и настройки">Скачать обработанный ZIP</button>
+                    <button id="dataset-metadata-download-btn" class="btn" title="JSON — сводка и метаданные датасета">Скачать метаданные JSON</button>
+                    <button id="dataset-config-download-btn" class="btn" title="JSON — техническая конфигурация импорта">Скачать конфигурацию JSON</button>
+                    <button id="preprocessing-config-download-btn" class="btn" disabled title="JSON — параметры предобработки">Скачать предобработку JSON</button>
                 </div>
             </details>
         </section>
@@ -485,7 +485,7 @@
         </section>
         <section class="card" id="saved-datasets-card">
             <h3>Сохранённые датасеты</h3>
-            <p class="block-description">Сохраняйте raw и processed версии, чтобы не загружать один и тот же датасет перед каждым запуском.</p>
+            <p class="block-description">Сохраняйте исходные и обработанные версии, чтобы не загружать один и тот же датасет перед каждым запуском.</p>
             <div class="line-controls wrap">
                 <input id="save-dataset-name" class="input-field" type="text" placeholder="Название датасета">
                 <select id="save-dataset-version" class="input-field">
@@ -520,7 +520,7 @@
 
         <section class="card">
             <h3>Настройки анализа</h3>
-            <p class="block-description">Мастер показывает только подходящие задачи и методы для выбранного target.</p>
+            <p class="block-description">Мастер показывает только подходящие задачи и методы для выбранной целевой переменной.</p>
             <div class="line-controls wrap analysis-mode-controls">
                 <label>Режим настройки
                     <select id="model-config-mode" class="input-field">
@@ -622,12 +622,12 @@
 
             <section class="analysis-section analysis-section--compact">
                 <h4>4. Обучение и сохранение</h4>
-                <label id="targets-wrap" class="model-advanced-field">Target-значения (для PLS/PLS-DA, через запятую или с новой строки)
+                <label id="targets-wrap" class="model-advanced-field">Значения целевой переменной (для PLS/PLS-DA, через запятую или с новой строки)
                     <textarea id="target-values" class="input-field" rows="3" placeholder="0,0,0,1,1,1"></textarea>
                 </label>
                 <div class="line-controls wrap model-advanced-field" id="targets-import-wrap">
                     <input id="targets-file" type="file" accept=".txt,.csv">
-                    <button id="load-targets-btn" class="btn">Подставить targets в поле</button>
+                    <button id="load-targets-btn" class="btn">Подставить метки в поле</button>
                     <span id="targets-file-hint" class="muted"></span>
                 </div>
 
