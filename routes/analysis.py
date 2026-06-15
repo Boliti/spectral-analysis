@@ -63,6 +63,19 @@ def _safe_user_segment(value: Any) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "unknown"))
 
 
+def _safe_filename(value: Any) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "unknown")).strip("_-")[:128]
+
+
+def _build_run_csv_filename(run: Dict[str, Any]) -> str:
+    name = _safe_filename(run.get("dataset_name") or run.get("dataset_id") or "dataset")
+    version = _safe_filename(run.get("dataset_version") or "unknown")
+    run_type = _safe_filename(run.get("run_type") or "run")
+    run_id = _safe_filename(run.get("run_id") or "run")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"{name}_{version}_{run_type}_{run_id}_{timestamp}.csv"
+
+
 def dataset_slice(dataset: Any, index: int):
     metadata = dict(dataset.metadata or {})
     sample_metadata = metadata.get("sample_metadata") or []
@@ -1161,35 +1174,18 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             )
             metrics = trained.get("metrics") or {}
             saved_model = trained.get("saved_model") or {}
-            row_warnings = list(trained.get("warnings") or [])
-            if normalized_type == "compare_classification":
-                cm = metrics.get("confusion_matrix")
-                cm_accuracy = metrics.get("confusion_matrix_accuracy")
-                if cm is None:
-                    row_warnings.append("Validation/test confusion_matrix is unavailable; full-dataset confusion_matrix was not used.")
-                elif metrics.get("accuracy") is not None and cm_accuracy is not None and abs(float(metrics["accuracy"]) - float(cm_accuracy)) > 1e-6:
-                    row_warnings.append("confusion_matrix_accuracy differs from accuracy.")
             row = {
                 "method": method,
                 "status": "success",
                 "model_id": saved_model.get("model_id"),
                 "model_type": saved_model.get("model_type"),
                 "metrics": metrics,
-                "confusion_matrix": metrics.get("confusion_matrix"),
-                "classes": metrics.get("classes"),
-                "y_true": metrics.get("y_true"),
-                "y_pred": metrics.get("y_pred"),
-                "train_samples": metrics.get("train_samples"),
-                "test_samples": metrics.get("test_samples"),
-                "validation_mode": metrics.get("validation_mode"),
-                "confusion_matrix_total": metrics.get("confusion_matrix_total"),
-                "confusion_matrix_accuracy": metrics.get("confusion_matrix_accuracy"),
+                "confusion_matrix": metrics.get("confusion_matrix") or trained.get("result", {}).get("confusion_matrix"),
                 "params": saved_model.get("model_params") or saved_model.get("params") or {},
-                "warnings": row_warnings,
+                "warnings": trained.get("warnings") or [],
                 "plot": trained.get("plot") or {},
                 **metrics,
             }
-            row["warnings"] = row_warnings
             rows.append(row)
             saved_models.append(saved_model)
         except Exception as exc:
@@ -1253,12 +1249,13 @@ def _best_method(run_type: str, rows: List[Dict[str, Any]]) -> Optional[str]:
         return None
     if run_type == "compare_classification":
         return max(rows, key=lambda row: (float(row.get("f1_macro") or 0), float(row.get("accuracy") or 0))).get("method")
-    if run_type == "compare_regression":
-        return min(
+    if run_type == "compare_clustering":
+        return max(
             rows,
             key=lambda row: (
-                float(row.get("rmse") if row.get("rmse") is not None else 1e99),
-                -float(row.get("r2") if row.get("r2") is not None else -1e99),
+                float(row.get("silhouette_score") if row.get("silhouette_score") is not None else -1),
+                float(row.get("adjusted_rand_score") if row.get("adjusted_rand_score") is not None else -1),
+                float(row.get("normalized_mutual_info_score") if row.get("normalized_mutual_info_score") is not None else -1),
             ),
         ).get("method")
     if run_type == "compare_clustering":
@@ -1395,9 +1392,28 @@ async def export_run(request: Request, run_id: str):
     )
 
 
+@router.get("/runs/{run_id}/csv")
+async def export_run_csv(request: Request, run_id: str):
+    try:
+        csv_payload = user_run_manager(current_analysis_user(request)).csv_bytes(run_id)
+        run = user_run_manager(current_analysis_user(request)).get(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    return StreamingResponse(
+        io.BytesIO(csv_payload),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{_build_run_csv_filename(run)}"'},
+    )
+
+
 @router.get("/experiments/{run_id}/export")
 async def export_experiment(request: Request, run_id: str):
     return await export_run(request, run_id)
+
+
+@router.get("/experiments/{run_id}/csv")
+async def export_experiment_csv(request: Request, run_id: str):
+    return await export_run_csv(request, run_id)
 
 
 @router.post("/configs")

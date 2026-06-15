@@ -1757,9 +1757,18 @@ function showResultTab(name = "summary") {
     });
 }
 
+function downloadRunCsv(runId) {
+    if (!runId) {
+        showToast("warning", "run_id не найден.");
+        return;
+    }
+    window.location.href = `/analysis/runs/${encodeURIComponent(runId)}/csv`;
+}
+
 function updateResultDownloads(runId = lastRenderedRunId) {
     if (!resultDownloads) return;
     const buttons = [
+        `<button type="button" class="btn" data-run-csv="${escapeHtml(runId || "")}">Скачать CSV результата</button>`,
         lastPredictionRows.length
             ? `<button type="button" class="btn" data-download-predictions-csv>Скачать CSV результатов</button>`
             : `<button type="button" class="btn" data-download-comparison-csv>Скачать CSV результатов</button>`,
@@ -5411,6 +5420,7 @@ function initAnalysisPage() {
         if (target?.hasAttribute?.("data-download-comparison-csv")) downloadCurrentComparisonCsv();
         if (target?.hasAttribute?.("data-download-predictions-csv")) downloadPredictionsCsv();
         if (target?.hasAttribute?.("data-download-result-json")) downloadCurrentResultJson();
+        if (target?.hasAttribute?.("data-run-csv")) downloadRunCsv(target.getAttribute("data-run-csv"));
         if (runExport) exportRunById(runExport);
         if (openRun) openSelectedRun(openRun);
         if (deleteRun) deleteSelectedRun(deleteRun);
