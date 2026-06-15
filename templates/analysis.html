@@ -62,7 +62,7 @@
             <h3>Методы</h3>
             <p>PCA показывает визуальную структуру. PLS-DA, SVM, Random Forest и Decision Tree решают классификацию. k-means и HCA ищут группы без целевой переменной. PLS Regression и SVR предсказывают числовую целевую переменную.</p>
             <h3>Предобработка</h3>
-            <p>Коррекция базовой линии убирает фон, сглаживание снижает шум, нормализация приводит спектры к сопоставимому масштабу. Raw — исходные данные, processed — сохранённая обработанная версия.</p>
+            <p>Коррекция базовой линии убирает фон, сглаживание снижает шум, нормализация приводит спектры к сопоставимому масштабу. Исходные данные — данные без обработки, предобработанные данные — сохранённая обработанная версия.</p>
             <h3>Результаты</h3>
             <p>Для классификации выводятся accuracy, precision, recall, F1 и матрица ошибок. Для регрессии — R2, RMSE, MAE, график факт/прогноз и остатки.</p>
             <h3>Частые ошибки</h3>
@@ -195,7 +195,7 @@
                         <span class="field-hint">Откуда брать классы/целевые значения.</span>
                         <select id="dataset-target-source" class="input-field">
                             <option value="column">Колонка таблицы</option>
-                            <option value="sheet_name">Имя листа Excel</option>
+                            <option value="sheet_name">лист Excel / группа</option>
                             <option value="folder_name">Имя папки</option>
                             <option value="filename_regex">Regex из имени файла</option>
                             <option value="file_name">Имя файла</option>
@@ -287,8 +287,8 @@
             <div class="line-controls wrap">
                 <label>Версия данных для графика
                     <select id="dataset-preview-version" class="input-field">
-                        <option value="raw">raw</option>
-                        <option value="processed" disabled>processed</option>
+                        <option value="raw">исходные данные</option>
+                        <option value="processed" disabled>предобработанные данные</option>
                     </select>
                 </label>
                 <span id="dataset-preview-status" class="muted"></span>
@@ -298,9 +298,9 @@
                 <summary>Дополнительный экспорт</summary>
                 <div class="line-controls wrap">
                     <button id="dataset-export-zip-btn" class="btn" title="ZIP — полный пакет данных и настроек">Скачать ZIP-пакет</button>
-                    <button id="dataset-export-processed-csv-btn" class="btn" disabled title="Processed CSV — обработанная версия для анализа">Скачать обработанный CSV</button>
-                    <button id="dataset-export-processed-xlsx-btn" class="btn" disabled title="Processed XLSX — обработанная версия для Excel">Скачать обработанный XLSX</button>
-                    <button id="dataset-export-processed-zip-btn" class="btn" disabled title="Processed ZIP — обработанные данные и настройки">Скачать обработанный ZIP</button>
+                    <button id="dataset-export-processed-csv-btn" class="btn" disabled title="Предобработанный CSV — обработанная версия для анализа">Скачать обработанный CSV</button>
+                    <button id="dataset-export-processed-xlsx-btn" class="btn" disabled title="Предобработанный XLSX — обработанная версия для Excel">Скачать обработанный XLSX</button>
+                    <button id="dataset-export-processed-zip-btn" class="btn" disabled title="Предобработанный ZIP — обработанные данные и настройки">Скачать обработанный ZIP</button>
                     <button id="dataset-metadata-download-btn" class="btn" title="JSON — сводка и метаданные датасета">Скачать метаданные JSON</button>
                     <button id="dataset-config-download-btn" class="btn" title="JSON — техническая конфигурация импорта">Скачать конфигурацию JSON</button>
                     <button id="preprocessing-config-download-btn" class="btn" disabled title="JSON — параметры предобработки">Скачать предобработку JSON</button>
@@ -489,8 +489,8 @@
             <div class="line-controls wrap">
                 <input id="save-dataset-name" class="input-field" type="text" placeholder="Название датасета">
                 <select id="save-dataset-version" class="input-field">
-                    <option value="raw">raw</option>
-                    <option value="processed">processed</option>
+                    <option value="raw">исходные данные</option>
+                    <option value="processed">предобработанные данные</option>
                 </select>
                 <button id="save-dataset-btn" class="btn btn-primary" type="button">Сохранить текущий датасет</button>
                 <button id="refresh-saved-datasets-btn" class="btn" type="button">Обновить список</button>
@@ -631,7 +631,7 @@
                     <span id="targets-file-hint" class="muted"></span>
                 </div>
 
-            <div class="grid">
+            <div class="grid training-save-grid">
                 <label>Название модели
                     <input id="model-name" class="input-field" type="text" placeholder="Например, plsda_plasma_batch_01">
                 </label>
@@ -641,18 +641,22 @@
                         <option value="processed" disabled>Предобработанный датасет</option>
                     </select>
                 </label>
-                <label>Валидация
+                <label class="hidden-control">Валидация
                     <select id="do-validation" class="input-field">
                         <option value="true">Включена (train/test)</option>
                         <option value="false">Выключена</option>
                     </select>
                 </label>
-                <label>Доля тестовой выборки (0.1 - 0.5)
+                <label class="check-row" id="validation-toggle-wrap">
+                    <input id="validation-enabled-toggle" type="checkbox" checked>
+                    <span>Использовать валидацию train/test</span>
+                </label>
+                <label id="test-size-wrap">Доля тестовой выборки
                     <input id="test-size" class="input-field" type="number" min="0.1" max="0.5" step="0.05" value="0.3">
                 </label>
-                <label>
+                <label class="check-row">
+                    <input id="save-model-after-training" type="checkbox" checked>
                     <span>Сохранить модель после обучения</span>
-                    <input id="save-model-after-training" type="checkbox" checked disabled>
                 </label>
             </div>
 

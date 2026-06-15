@@ -3,6 +3,7 @@ let datasetPreviewPayload = null;
 let importedDatasetId = null;
 let importedDatasetSummary = null;
 let activeDatasetId = null;
+let activeSavedDatasetId = null;
 let processedDatasetReady = false;
 let lastResultPayload = null;
 let lastComparisonRows = [];
@@ -119,8 +120,11 @@ const targetsFileHint = document.getElementById("targets-file-hint");
 const modelNameInput = document.getElementById("model-name");
 const nComponentsInput = document.getElementById("n-components");
 const doValidationInput = document.getElementById("do-validation");
+const validationEnabledToggle = document.getElementById("validation-enabled-toggle");
+const testSizeWrap = document.getElementById("test-size-wrap");
 const testSizeInput = document.getElementById("test-size");
 const randomStateInput = document.getElementById("random-state");
+const saveModelAfterTrainingInput = document.getElementById("save-model-after-training");
 
 const uploadModelFileInput = document.getElementById("upload-model-file");
 const uploadMetaFileInput = document.getElementById("upload-meta-file");
@@ -156,7 +160,7 @@ const TARGET_SOURCE_OPTIONS = {
         ["none", "Без целевой переменной"],
     ],
     excel_columns: [
-        ["sheet_name", "Имя листа Excel"],
+        ["sheet_name", "лист Excel / группа"],
         ["file_name", "Имя файла"],
         ["manual", "Один общий класс"],
         ["none", "Без целевой переменной"],
@@ -519,6 +523,80 @@ function showError(userMessage, details = "") {
     showToast("error", message || "Операция не выполнена.");
 }
 
+function isMeaningfulValue(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === "string") {
+        const text = value.trim();
+        return Boolean(text) && !["undefined", "null", "nan", "n/a", "н/д"].includes(text.toLowerCase());
+    }
+    if (Array.isArray(value)) return value.some(isMeaningfulValue);
+    if (typeof value === "object") return Object.values(value).some(isMeaningfulValue);
+    return true;
+}
+
+function cleanList(values = []) {
+    return (Array.isArray(values) ? values : [values])
+        .map((value) => (value === null || value === undefined ? "" : String(value).trim()))
+        .filter((value) => value && !["undefined", "null"].includes(value.toLowerCase()));
+}
+
+function compactValue(value, fallback = "") {
+    if (!isMeaningfulValue(value)) return fallback;
+    if (Array.isArray(value)) return cleanList(value).join(", ");
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+}
+
+function renderInfoRows(rows = []) {
+    const cleanRows = rows.filter(([, value]) => isMeaningfulValue(value));
+    if (!cleanRows.length) return `<p class="technical-empty">Нет дополнительных технических сведений.</p>`;
+    return `<dl class="technical-kv">${cleanRows.map(([label, value]) => `
+        <div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(compactValue(value))}</dd></div>
+    `).join("")}</dl>`;
+}
+
+function renderTechnicalGroup(title, rows = []) {
+    return `<section class="technical-group"><h5>${escapeHtml(title)}</h5>${renderInfoRows(rows)}</section>`;
+}
+
+function renderDatasetTechnicalDetails(summary = {}) {
+    const distribution = summary.class_distribution || {};
+    const classes = Object.keys(distribution).length
+        ? Object.entries(distribution).map(([cls, count]) => `${cls}: ${count}`)
+        : cleanList(summary.classes || summary.metadata?.classes || []);
+    const warnings = cleanList(summary.technical_warnings || summary.warnings || []);
+    const sourceFiles = cleanList(summary.source_files || summary.metadata?.source_files || []);
+    return `
+        <div class="technical-details">
+            ${renderTechnicalGroup("Основные сведения", [
+                ["id датасета", summary.dataset_id || importedDatasetId],
+                ["версия", formatDatasetVersion(summary.version || "raw")],
+                ["выбранные листы", cleanList(summary.selected_sheets || [])],
+                ["режим", summary.sheet_mode || summary.source_layout],
+                ["спектров", summary.n_samples],
+                ["признаков", summary.n_features],
+                ["диапазон оси", summary.axis_min !== undefined || summary.axis_max !== undefined ? `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}` : ""],
+                ["целевая переменная", formatTargetName(summary.target_name || "none")],
+                ["классы", classes],
+            ])}
+            ${renderTechnicalGroup("Параметры качества", [
+                ["SNR средний", summary.snr?.mean],
+                ["SNR min", summary.snr?.min],
+                ["SNR max", summary.snr?.max],
+                ["NaN/Inf", summary.nan_count ?? 0],
+                ["пропуски", summary.missing_fraction !== undefined ? formatPercent(summary.missing_fraction || 0) : ""],
+                ["пустых спектров", summary.empty_spectra_count],
+                ["предупреждения", warnings],
+            ])}
+            ${sourceFiles.length ? sourceFilesDetails(sourceFiles, true) : `<section class="technical-group"><h5>Исходные файлы</h5><p class="technical-empty">Нет дополнительных технических сведений.</p></section>`}
+            <details class="raw-json-details">
+                <summary>Показать raw JSON</summary>
+                <pre>${escapeHtml(JSON.stringify(summary, null, 2))}</pre>
+            </details>
+        </div>
+    `;
+}
+
 function humanError(data, fallback = "Операция не выполнена.") {
     const raw = String(data?.user_message || data?.detail || data?.message || fallback);
     if (raw.includes("window_length") || raw.includes("size of x")) {
@@ -581,6 +659,20 @@ function setBusy(button, busyText) {
     };
 }
 
+async function runUiAction(button, loadingText, asyncCallback, successText = "") {
+    const doneBusy = setBusy(button, loadingText || "Выполняется...");
+    try {
+        const result = await asyncCallback();
+        if (successText) showToast(successText, "success");
+        return result;
+    } catch (error) {
+        showToast(error.message || "Операция не выполнена.", "error");
+        throw error;
+    } finally {
+        doneBusy();
+    }
+}
+
 function setSectionStatus(sectionId, status, message) {
     const section = document.getElementById(sectionId);
     if (!section) return;
@@ -601,20 +693,27 @@ function markStepDone(step) {
     tab.classList.remove("workflow-tab--active", "workflow-tab--warning", "workflow-tab--error");
     tab.classList.add("workflow-tab--done");
     const state = tab.querySelector(".step-state");
-    if (state) state.textContent = "done";
+    if (state) state.textContent = "готово";
 }
 
 function setWorkflowStepStatus(step, status = "active") {
     const tab = document.querySelector(`.workflow-tab[data-step="${step}"]`);
     if (!tab) return;
-    tab.classList.remove("workflow-tab--active", "workflow-tab--warning", "workflow-tab--error", "workflow-tab--done");
+    tab.classList.remove("workflow-tab--active", "workflow-tab--warning", "workflow-tab--error", "workflow-tab--done", "workflow-tab--skipped");
     if (status === "done") {
         markStepDone(step);
         return;
     }
     tab.classList.add(`workflow-tab--${status}`);
     const state = tab.querySelector(".step-state");
-    if (state) state.textContent = status;
+    const labels = {
+        active: "активно",
+        warning: "предупреждение",
+        error: "ошибка",
+        skipped: "пропущена",
+        "not-started": "не начато",
+    };
+    if (state) state.textContent = labels[status] || formatStatus(status);
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 120000, slowMessage = "Обработка занимает больше времени, чем обычно. Это нормально для больших датасетов.") {
@@ -1083,8 +1182,8 @@ function inferenceReportText(payload = {}) {
         `Модель: ${meta.model_name || meta.model_id || payload.model_id || "н/д"}`,
         `Тип модели: ${meta.model_type || payload.model_type || "н/д"}`,
         `Обучающий датасет: ${meta.dataset_id || meta.source_dataset_name || "н/д"}`,
-        `Версия данных: ${meta.dataset_version || (meta.used_processed_data ? "processed" : "raw")}`,
-        `Предобработка: базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`,
+        `Версия данных: ${formatDatasetVersion(meta.dataset_version || (meta.used_processed_data ? "processed" : "raw"))}`,
+        `Предобработка: ${formatPreprocessingSummary(preprocessing)}`,
         `Ожидаемые признаки: ${first.expected_feature_count || meta.expected_feature_count || meta.feature_count || "н/д"}`,
         `Признаки во входном файле: ${first.input_feature_count || "н/д"}`,
         `Признаки после подготовки: ${first.prepared_feature_count || "н/д"}`,
@@ -1110,7 +1209,7 @@ function renderPredictionsTable(payload) {
     const modelName = meta.model_name || meta.model_id || payload.model_id || selectedModel?.modelId || "н/д";
     const modelType = meta.model_type || payload.model_type || selectedModel?.modelType || "н/д";
     const allOneClassWarning = Object.keys(counts).length === 1 && lastPredictionRows.length > 1
-        ? `<div class="ui-alert ui-alert--warning">Все файлы отнесены к одному классу. Проверьте ось спектра, предобработку и применимость модели.</div>`
+        ? `<div class="ui-alert ui-alert--warning">Все файлы отнесены к одному классу. Это может быть корректно, если входные файлы относятся к одному классу, но при смешанном наборе данных стоит проверить модель, ось спектра и предобработку.</div>`
         : "";
     const rowsHtml = lastPredictionRows.map((row) => `
         <tr>
@@ -1173,15 +1272,29 @@ function renderStructuredResult(payload, mode) {
         const saved = payload.saved_model || {};
         if (resultExplainer) {
             const bestMetric = payload.metrics?.f1_macro ?? payload.metrics?.accuracy ?? payload.metrics?.r2 ?? payload.metrics?.silhouette_score ?? payload.metrics?.inertia ?? payload.validation?.metrics?.f1_macro ?? payload.validation?.metrics?.accuracy ?? "н/д";
+            const quality = evaluateModelQuality(
+                payload.metrics || payload.validation?.metrics || {},
+                payload.task_type || payload.model_type || "analysis",
+                importedDatasetSummary?.n_samples || payload.summary?.n_samples,
+                importedDatasetSummary?.classes?.length,
+                {
+                    class_distribution: importedDatasetSummary?.class_distribution,
+                    validation_status: payload.validation?.status,
+                    no_validation: payload.validation?.status && payload.validation.status !== "ok",
+                }
+            );
             resultExplainer.textContent = [
                 "Анализ завершён.",
                 `метод: ${payload.model_type || saved.model_type || "н/д"}`,
-                `задача: ${payload.task_type || "н/д"}`,
+                `задача: ${formatTask(payload.task_type || "н/д")}`,
                 `id датасета: ${payload.dataset_id || activeDatasetId || "н/д"}`,
-                `версия данных: ${payload.dataset_version || (trainDatasetVersionInput?.value || "raw")}`,
-                `целевая переменная: ${importedDatasetSummary?.target_name || payload.target_name || "н/д"}`,
-                `статус: ${payload.status || "успешно"}`,
+                `версия данных: ${formatDatasetVersion(payload.dataset_version || (trainDatasetVersionInput?.value || "raw"))}`,
+                `целевая переменная: ${formatTargetName(importedDatasetSummary?.target_name || payload.target_name || "н/д")}`,
+                `статус: ${formatStatus(payload.status || "success")}`,
                 `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
+                `оценка качества: ${quality.title}`,
+                `комментарий: ${quality.comment}`,
+                quality.warnings.length ? `предупреждения качества:\n- ${quality.warnings.join("\n- ")}` : "",
                 `id запуска: ${payload.run_id || payload.run?.run_id || "н/д"}`,
                 `Модель сохранена: ${saved.model_id || "unknown"} (${saved.model_type || "n/a"}).`,
                 "",
@@ -1306,12 +1419,12 @@ function renderComparisonResult(payload) {
         resultExplainer.textContent = [
             "Сравнение методов завершено.",
             `метод: ${best || "сравнение"}`,
-            `задача: ${payload.task_type || run.run_type || "сравнение"}`,
+            `задача: ${formatTask(payload.task_type || run.run_type || "comparison")}`,
             `id датасета: ${payload.dataset_id || run.dataset_id || activeDatasetId || "н/д"}`,
             `id запуска: ${payload.run_id || run.run_id || "н/д"}`,
-            `версия данных: ${payload.dataset_version || (run.used_processed_data ? "processed" : "raw")}`,
-            `целевая переменная: ${run.target_name || payload.summary?.target_name || "н/д"}`,
-            `статус: ${payload.status || run.status || "успешно"}`,
+            `версия данных: ${formatDatasetVersion(payload.dataset_version || (run.used_processed_data ? "processed" : "raw"))}`,
+            `целевая переменная: ${formatTargetName(run.target_name || payload.summary?.target_name || "н/д")}`,
+            `статус: ${formatStatus(payload.status || run.status || "success")}`,
             `лучшая модель: ${best || "н/д"}`,
             `лучшая метрика: ${typeof bestMetric === "number" ? bestMetric.toFixed(4) : bestMetric}`,
             "",
@@ -1378,7 +1491,7 @@ function renderMetricsTable(rows, bestMethod = "") {
     lastComparisonRows = rows;
     const metricKeys = ["accuracy", "precision_macro", "recall_macro", "f1_macro", "r2", "mae", "rmse", "n_clusters", "inertia", "silhouette_score", "cluster_distribution", "adjusted_rand_score", "normalized_mutual_info_score"];
     const activeKeys = metricKeys.filter((key) => rows.some((row) => row[key] !== undefined || row.metrics?.[key] !== undefined));
-    const head = ["Метод", ...activeKeys, "Статус"].map((v) => `<th>${escapeHtml(v)}</th>`).join("");
+    const head = ["Метод", ...activeKeys.map(formatMetricName), "Статус"].map((v) => `<th>${escapeHtml(v)}</th>`).join("");
     const body = rows.map((row) => {
         const metrics = row.metrics || row;
         const cells = activeKeys.map((key) => {
@@ -1386,7 +1499,8 @@ function renderMetricsTable(rows, bestMethod = "") {
             return `<td>${typeof value === "number" ? value.toFixed(4) : escapeHtml(typeof value === "object" && value !== null ? JSON.stringify(value) : (value ?? ""))}</td>`;
         }).join("");
         const cls = row.method === bestMethod ? "comparison-best-row" : "";
-        return `<tr class="${cls}"><td><strong>${escapeHtml(row.method || row.model_type || "model")}</strong></td>${cells}<td>${escapeHtml(row.status || "success")}</td></tr>`;
+        const methodTitle = ANALYSIS_METHOD_INFO[row.method || row.model_type]?.[0] || row.method || row.model_type || "model";
+        return `<tr class="${cls}"><td><strong>${escapeHtml(methodTitle)}</strong></td>${cells}<td>${statusBadge(row.status || "success")}</td></tr>`;
     }).join("");
     comparisonResult.innerHTML = `
         <table class="comparison-table compact-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
@@ -1398,7 +1512,7 @@ function metricHelpText(keys = []) {
     const lines = [];
     if (keys.includes("f1_macro")) lines.push("F1 macro учитывает баланс precision и recall по каждому классу и удобен при несбалансированных классах.");
     if (keys.includes("silhouette_score")) lines.push("Silhouette score показывает отделимость кластеров: ближе к 1 — лучше, около 0 — кластеры перекрываются.");
-    if (keys.includes("inertia")) lines.push("Inertia — суммарная внутрикластерная ошибка; её полезно сравнивать при разных n_clusters.");
+    if (keys.includes("inertia")) lines.push("Inertia — суммарная внутрикластерная ошибка; её полезно сравнивать при разном числе кластеров.");
     if (keys.includes("r2")) lines.push("R² показывает качество аппроксимации: чем ближе к 1, тем лучше.");
     if (keys.includes("rmse")) lines.push("RMSE показывает типичный масштаб ошибки прогноза в единицах целевой переменной.");
     return escapeHtml(lines.join(" "));
@@ -1679,7 +1793,7 @@ function keepDatasetUploadVisible() {
 function applyWorkflowMode() {
     const mode = workflowModeInput?.value || "full";
     const importSection = document.getElementById("import-section");
-    const wizardCards = importSection ? Array.from(importSection.querySelectorAll(".card")).filter((card) => card.id !== "standard-import-card" && card.id !== "dataset-ready-card") : [];
+    const wizardCards = importSection ? Array.from(importSection.querySelectorAll(":scope > .card, :scope > .collapsible-content > .card")).filter((card) => card.id !== "standard-import-card" && card.id !== "dataset-ready-card") : [];
     const standardCard = document.getElementById("standard-import-card");
     const preprocessingSection = document.getElementById("preprocessing-card");
     const trainingSection = document.getElementById("training-section");
@@ -1724,7 +1838,10 @@ function applyWorkflowMode() {
 }
 
 function revealPreprocessingSettings() {
-    if (preprocessingCard) preprocessingCard.style.display = "block";
+    if (preprocessingCard) {
+        preprocessingCard.style.display = "block";
+        preprocessingCard.classList.remove("preprocessing-card--collapsed");
+    }
     preprocessingCard?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -1896,7 +2013,7 @@ function targetCandidateText(candidate) {
 function candidateSourceLabel(candidate) {
     const labels = {
         none: "Без целевой переменной",
-        sheet_name: "Имя листа Excel",
+        sheet_name: "лист Excel / группа",
         folder_name: "Имя папки",
         column: "Колонка таблицы",
         filename_regex: "Regex из имени файла",
@@ -2286,22 +2403,24 @@ function renderDatasetSummary(summary) {
         ].join("\n")
         : (detectedMeasurementLines || "не указаны");
     renderDetectedMeasurementSummary(summary);
+    datasetSummaryEl.innerHTML = renderDatasetTechnicalDetails(summary);
+    return;
     datasetSummaryEl.textContent = [
         `id датасета: ${summary.dataset_id || importedDatasetId || "ещё не сохранён"}`,
-        `Версия: ${summary.version || "raw"}`,
+        `Версия: ${formatDatasetVersion(summary.version || "raw")}`,
         `Выбранные листы: ${(summary.selected_sheets || []).join(", ") || "н/д"}`,
         `Режим листов: ${summary.sheet_mode || "н/д"}`,
         `Спектров: ${summary.n_samples}`,
         `Спектральных точек: ${summary.n_features}`,
         `Диапазон оси: ${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`,
-        `Целевая переменная: ${summary.target_name || "нет"}`,
+        `Целевая переменная: ${formatTargetName(summary.target_name || "none")}`,
         targetDetails,
         `NaN/Inf: ${summary.nan_count ?? 0}`,
         `Пропуски: ${formatPercent(summary.missing_fraction || 0)}`,
         `Пустых спектров: ${summary.empty_spectra_count ?? 0}`,
         `Отрицательные интенсивности: ${summary.has_negative_intensity ? "есть" : "нет"}`,
         `SNR средний/мин/макс: ${formatNumber(summary.snr?.mean)} / ${formatNumber(summary.snr?.min)} / ${formatNumber(summary.snr?.max)}`,
-        `Технический статус: ${summary.technical_status || "н/д"}`,
+        `Технический статус: ${formatStatus(summary.technical_status || "none")}`,
         summary.technical_warnings?.length ? `Технические предупреждения:\n- ${summary.technical_warnings.join("\n- ")}` : "",
         `Параметры измерений:\n${measurementLines}`,
         `Первые id образцов: ${(summary.sample_ids_preview || []).join(", ")}`,
@@ -2348,12 +2467,12 @@ function renderDatasetReady(summary) {
         ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д", "dataset"],
         ["Спектров", summary.n_samples, "count"],
         ["Признаков", summary.n_features, "count"],
-        ["Целевая переменная", summary.target_name || "нет", summary.target_name ? "target" : "warning"],
+        ["Целевая переменная", formatTargetName(summary.target_name || "none"), summary.target_name ? "target" : "warning"],
         [summary.target_type === "numeric" ? "Тип целевой переменной" : "Классы", targetInfo, "classes"],
-        ["Задача", summary.task_recommendation || "н/д", "task"],
+        ["Задача", formatTask(summary.task_recommendation || "analysis"), "task"],
         ["Диапазон", `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`, "range"],
-        ["NaN/Inf", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
-        ["Статус", summary.technical_status || "ok", summary.technical_status === "ok" || !summary.technical_status ? "success" : "warning"],
+        ["NAN/INF", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
+        ["Статус", formatStatus(summary.technical_status || "ok"), summary.technical_status === "ok" || !summary.technical_status ? "success" : "warning"],
     ];
     const technical = [
         `id датасета: ${summary.dataset_id || importedDatasetId || "н/д"}`,
@@ -2367,15 +2486,14 @@ function renderDatasetReady(summary) {
             ${tiles.map(([label, value, kind]) => `
                 <div class="summary-tile summary-tile--${escapeHtml(kind || "default")}">
                     <div class="summary-label">${escapeHtml(label)}</div>
-                    <div class="summary-value" title="${escapeHtml(value)}">${escapeHtml(shortText(value, 54))}</div>
+                    <div class="summary-value" title="${escapeHtml(value)}">${escapeHtml(shortText(value, 72))}</div>
                 </div>
             `).join("")}
         </div>
         <details>
             <summary>Показать технические сведения</summary>
-            <pre>${escapeHtml(technical)}</pre>
+            ${renderDatasetTechnicalDetails(summary)}
         </details>
-        ${sourceFilesDetails(summary.source_files || summary.metadata?.source_files || [])}
     `;
     datasetReadyCard.style.display = "block";
     if (datasetPreviewVersionInput) {
@@ -2590,20 +2708,20 @@ function methodParamsText(modelType = selectedAnalysisMethod || modelTypeInput?.
     const linkage = document.getElementById("model-linkage")?.value || "ward";
     const standardize = document.getElementById("model-standardize-cluster")?.checked ? "да" : "нет";
     const params = {
-        pca: [`n_components=${nComponents}`],
-        plsda: [`n_components=${nComponents}`],
-        pls: [`n_components=${nComponents}`],
-        kmeans: [`n_clusters=${nClusters}`, `random_state=${randomState}`, `стандартизация=${standardize}`],
-        hca: [`n_clusters=${nClusters}`, `linkage=${linkage}`],
-        svm: [`C=${cValue}`, `kernel=${kernel}`, `gamma=${gamma}`],
-        random_forest: [`n_estimators=${estimators}`, `max_depth=${maxDepth}`, `random_state=${randomState}`],
-        decision_tree: [`max_depth=${maxDepth}`, `random_state=${randomState}`],
-        svr: [`C=${cValue}`, `epsilon=${epsilon}`, `kernel=${kernel}`, `gamma=${gamma}`],
-        compare_classification: [`random_state=${randomState}`],
-        compare_regression: [`random_state=${randomState}`],
-        compare_clustering: [`n_clusters=${nClusters}`, `random_state=${randomState}`, `linkage=${linkage}`],
+        pca: [formatParamPair("n_components", nComponents)],
+        plsda: [formatParamPair("n_components", nComponents)],
+        pls: [formatParamPair("n_components", nComponents)],
+        kmeans: [formatParamPair("n_clusters", nClusters), formatParamPair("random_state", randomState), formatParamPair("standardize_cluster", standardize)],
+        hca: [formatParamPair("n_clusters", nClusters), formatParamPair("linkage", linkage)],
+        svm: [formatParamPair("C", cValue), formatParamPair("kernel", kernel), formatParamPair("gamma", gamma)],
+        random_forest: [formatParamPair("n_estimators", estimators), formatParamPair("max_depth", maxDepth), formatParamPair("random_state", randomState)],
+        decision_tree: [formatParamPair("max_depth", maxDepth), formatParamPair("random_state", randomState)],
+        svr: [formatParamPair("C", cValue), formatParamPair("epsilon", epsilon), formatParamPair("kernel", kernel), formatParamPair("gamma", gamma)],
+        compare_classification: [formatParamPair("random_state", randomState)],
+        compare_regression: [formatParamPair("random_state", randomState)],
+        compare_clustering: [formatParamPair("n_clusters", nClusters), formatParamPair("random_state", randomState), formatParamPair("linkage", linkage)],
     };
-    return (params[modelType] || [`random_state=${randomState}`]).join(", ");
+    return (params[modelType] || [formatParamPair("random_state", randomState)]).join(", ");
 }
 
 function renderMethodParamsSimple(modelType = selectedAnalysisMethod || modelTypeInput?.value || "") {
@@ -2667,6 +2785,7 @@ function renderAnalysisRunSummary() {
     const task = analysisTaskDefinitions(importedDatasetSummary).find((item) => item.goal === selectedAnalysisTask);
     const datasetVersion = trainDatasetVersionInput?.value === "processed" ? "processed" : "raw";
     const targetName = importedDatasetSummary?.target_name || "не задан";
+    const datasetName = datasetDisplayName(importedDatasetSummary, activeDatasetId || importedDatasetId || "");
     const simple = (modelConfigModeInput?.value || "simple") === "simple";
     const trainBtn = document.getElementById("train-btn");
     if (!selectedAnalysisTask || (!selectedAnalysisMethod && selectedAnalysisTask !== "compare")) {
@@ -2678,9 +2797,10 @@ function renderAnalysisRunSummary() {
         return;
     }
     const parts = [
-        `Будет запущено: ${task?.title || "задача"}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
-        `данные: ${datasetVersion}`,
-        `целевая переменная: ${targetName}`,
+        `Будет запущено: ${formatTask(task?.goal || selectedAnalysisTask || "задача")}${selectedAnalysisTask === "compare" ? "" : ` → ${modelTitle}`}`,
+        `данные: ${formatDatasetVersion(datasetVersion)}`,
+        `датасет: ${shortText(datasetName, 48)}`,
+        `целевая переменная: ${formatTargetName(targetName)}`,
     ];
     parts.push(`параметры: ${methodParamsText(modelType)}`);
     const summaryText = parts.join(" · ");
@@ -2725,23 +2845,245 @@ function shortText(value, max = 56) {
     return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
 }
 
+function normalizeDisplayValue(value) {
+    if (value === null || value === undefined || value === "") return "none";
+    return String(value);
+}
+
+function formatDatasetVersion(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        raw: "исходные данные",
+        processed: "предобработанные данные",
+        none: "не задана",
+    };
+    return labels[normalized] || normalized;
+}
+
+function formatTask(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        classification: "классификация",
+        classify: "классификация",
+        regression: "регрессия",
+        regress: "регрессия",
+        clustering: "кластеризация",
+        cluster: "кластеризация",
+        exploratory: "визуальный анализ",
+        explore: "визуальный анализ",
+        analysis: "анализ",
+        comparison: "сравнение методов",
+        compare: "сравнение методов",
+        compare_classification: "сравнение классификаторов",
+        compare_regression: "сравнение регрессоров",
+        compare_clustering: "сравнение кластеризации",
+        categorical: "категориальная",
+        numeric: "числовая",
+        none: "не задана",
+    };
+    return labels[normalized] || normalized;
+}
+
+function formatTargetName(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        sheet_name: "лист Excel / группа",
+        slit_width_um: "ширина щели, мкм",
+        grating_lines_mm: "штрихов решётки, линий/мм",
+        folder_name: "папка",
+        source_file: "исходный файл",
+        file_name: "имя файла",
+        filename_regex: "regex из имени файла",
+        target: "целевая переменная",
+        none: "не задана",
+        нет: "не задана",
+    };
+    return labels[normalized] || normalized;
+}
+
+function formatParamName(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        n_components: "число компонент",
+        n_clusters: "число кластеров",
+        random_state: "случайное зерно",
+        test_size: "доля тестовой выборки",
+        max_depth: "максимальная глубина",
+        n_estimators: "число деревьев",
+        kernel: "ядро",
+        gamma: "gamma",
+        C: "C",
+        epsilon: "epsilon",
+        baseline: "коррекция фона",
+        smoothing: "сглаживание",
+        normalization: "нормализация",
+        crop: "обрезка диапазона",
+        linkage: "способ объединения",
+        standardize_cluster: "стандартизация",
+        standardization: "стандартизация",
+        none: "не задана",
+    };
+    return labels[normalized] || normalized;
+}
+
+function formatStatus(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        ok: "готово",
+        success: "успешно",
+        warning: "предупреждение",
+        error: "ошибка",
+        failed: "ошибка",
+        done: "готово",
+        active: "активно",
+        "not-started": "не начато",
+        running: "выполняется",
+        pending: "ожидает",
+        none: "не задана",
+    };
+    return labels[normalized] || normalized;
+}
+
+function formatPreprocessingSummary(value) {
+    if (!value) return "не применяется";
+    if (typeof value === "string") {
+        if (value === "raw") return "без предобработки";
+        if (value === "processed") return "предобработанные данные";
+        return value
+            .replace(/\bbaseline=/g, "коррекция фона: ")
+            .replace(/\bsmoothing=/g, "сглаживание: ")
+            .replace(/\bnormalization=/g, "нормализация: ")
+            .replace(/\bcrop=/g, "обрезка диапазона: ")
+            .replace(/\b(off|none|null)\b/gi, "выключено")
+            .replace(/,\s*/g, "; ");
+    }
+    const config = value.config || value.preprocessing_config || value.preprocessing || value;
+    const parts = [
+        ["baseline", config.baseline?.method || config.baseline],
+        ["smoothing", config.smoothing?.method || config.smoothing],
+        ["normalization", config.normalization?.method || config.normalization],
+    ].map(([key, method]) => `${formatParamName(key)}: ${methodLabel(method)}`);
+    if (config.crop?.enabled) {
+        parts.push(`${formatParamName("crop")}: ${config.crop.min_axis ?? "н/д"}–${config.crop.max_axis ?? "н/д"}`);
+    }
+    return parts.join("; ");
+}
+
+function formatMetricName(value) {
+    const normalized = normalizeDisplayValue(value);
+    const labels = {
+        accuracy: "accuracy",
+        precision_macro: "precision macro",
+        recall_macro: "recall macro",
+        f1_macro: "F1 macro",
+        r2: "R²",
+        rmse: "RMSE",
+        mae: "MAE",
+        silhouette: "silhouette",
+        silhouette_score: "silhouette",
+        inertia: "inertia",
+        explained_variance_total: "доля объяснённой дисперсии",
+        none: "н/д",
+    };
+    return labels[normalized] || normalized;
+}
+
+function metricValue(metrics = {}, keys = []) {
+    for (const key of keys) {
+        const value = metrics?.[key];
+        if (typeof value === "number" && Number.isFinite(value)) return value;
+    }
+    return null;
+}
+
+function evaluateModelQuality(metrics = {}, taskType = "analysis", sampleCount = null, classCount = null, extra = {}) {
+    const task = String(taskType || "analysis");
+    const warnings = [];
+    const n = Number(sampleCount || extra.n_samples || extra.sample_count || 0);
+    if (n > 0 && n < 30) warnings.push("Выборка небольшая, метрики могут быть нестабильными.");
+    if (extra.validation === false || extra.validation_status === "skipped" || extra.no_validation) {
+        warnings.push("Модель обучена без независимой проверки качества.");
+    }
+    const distribution = extra.class_distribution || {};
+    const counts = Object.values(distribution).map(Number).filter((v) => Number.isFinite(v) && v > 0);
+    if (counts.length > 1 && Math.max(...counts) / Math.min(...counts) >= 2) {
+        warnings.push("Классы несбалансированы, accuracy может быть недостаточно информативной.");
+    }
+
+    let title = "Оценка качества недоступна";
+    let comment = "Недостаточно метрик для качественной оценки модели.";
+    let level = "info";
+    const set = (nextTitle, nextComment, nextLevel) => {
+        title = nextTitle;
+        comment = nextComment;
+        level = nextLevel;
+    };
+
+    if (task.includes("class") || ["plsda", "svm", "random_forest", "decision_tree"].includes(task)) {
+        const score = metricValue(metrics, ["f1_macro", "accuracy"]);
+        if (score !== null) {
+            if (score >= 0.999) warnings.push("Подозрительно идеальный результат. Проверьте утечку данных, дубли и корректность train/test-разбиения.");
+            if (score >= 0.95) set("Очень высокое качество", `F1/accuracy = ${score.toFixed(3)}. Проверьте риск переобучения и корректность разбиения данных.`, "warning");
+            else if (score >= 0.85) set("Хорошая модель", `F1/accuracy = ${score.toFixed(3)}. Результат можно использовать для сравнения методов.`, "success");
+            else if (score >= 0.70) set("Среднее качество", `F1/accuracy = ${score.toFixed(3)}. Модель работает, но требует проверки признаков и параметров.`, "warning");
+            else set("Низкое качество", `F1/accuracy = ${score.toFixed(3)}. Требуется улучшить предобработку, признаки или параметры модели.`, "danger");
+        }
+    } else if (task.includes("regress") || ["pls", "svr"].includes(task)) {
+        const r2 = metricValue(metrics, ["r2"]);
+        if (r2 !== null) {
+            if (r2 >= 0.90) set("Очень хорошее качество регрессии", `R² = ${r2.toFixed(3)}. Проверьте устойчивость на независимой выборке.`, "success");
+            else if (r2 >= 0.70) set("Хорошее качество регрессии", `R² = ${r2.toFixed(3)}. Модель выглядит пригодной для сравнения.`, "success");
+            else if (r2 >= 0.40) set("Среднее качество", `R² = ${r2.toFixed(3)}. Ошибка прогноза может быть заметной.`, "warning");
+            else set("Слабое качество регрессии", `R² = ${r2.toFixed(3)}. Нужна проверка данных, предобработки и параметров.`, "danger");
+        }
+    } else if (task.includes("cluster") || ["kmeans", "hca"].includes(task)) {
+        const silhouette = metricValue(metrics, ["silhouette", "silhouette_score"]);
+        if (silhouette !== null) {
+            if (silhouette >= 0.60) set("Хорошее разделение кластеров", `Silhouette = ${silhouette.toFixed(3)}. Кластеры хорошо отделены.`, "success");
+            else if (silhouette >= 0.30) set("Умеренное разделение", `Silhouette = ${silhouette.toFixed(3)}. Кластеры частично пересекаются.`, "warning");
+            else set("Слабое разделение", `Silhouette = ${silhouette.toFixed(3)}. Структура кластеров выражена плохо.`, "danger");
+        }
+    }
+
+    return { title, comment, warnings, level };
+}
+
+function renderQualityBlock(quality = {}) {
+    const warnings = quality.warnings?.length
+        ? `<ul>${quality.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+        : "";
+    return `
+        <div class="quality-card quality-card--${escapeHtml(quality.level || "info")}">
+            <div class="quality-card__title">Оценка качества: ${escapeHtml(quality.title || "н/д")}</div>
+            <div class="quality-card__comment">${escapeHtml(quality.comment || "")}</div>
+            ${warnings}
+        </div>
+    `;
+}
+
+function formatParamPair(key, value) {
+    let displayed = value;
+    if (key === "max_depth" && (displayed === "" || displayed === null || displayed === undefined)) {
+        displayed = "без ограничения";
+    } else if (displayed === "" || displayed === null || displayed === undefined) {
+        displayed = "не задано";
+    } else if (displayed === true) {
+        displayed = "включено";
+    } else if (displayed === false) {
+        displayed = "выключено";
+    }
+    return `${formatParamName(key)} — ${displayed}`;
+}
+
 function versionBadge(version = "raw") {
     const safeVersion = String(version || "raw");
     const kind = safeVersion === "processed" ? "processed" : "raw";
-    return `<span class="ui-badge ui-badge--${kind}">${escapeHtml(safeVersion)}</span>`;
+    const compact = kind === "processed" ? "предобработанные" : "исходные";
+    return `<span class="ui-badge ui-badge--${kind}" title="${escapeHtml(formatDatasetVersion(safeVersion))}">${escapeHtml(compact)}</span>`;
 }
 
 function statusBadge(status = "success") {
     const safeStatus = String(status || "success");
-    const labels = {
-        success: "успешно",
-        ok: "готово",
-        warning: "предупреждение",
-        error: "ошибка",
-        failed: "ошибка",
-        running: "выполняется",
-        pending: "ожидает",
-    };
     const normalized = /fail|error|ошиб/i.test(safeStatus)
         ? "error"
         : /warn|пред/i.test(safeStatus)
@@ -2749,15 +3091,20 @@ function statusBadge(status = "success") {
             : /run|process|pending|вып/i.test(safeStatus)
                 ? "info"
                 : "success";
-    return `<span class="ui-badge ui-badge--${normalized}">${escapeHtml(labels[safeStatus] || safeStatus)}</span>`;
+    return `<span class="ui-badge ui-badge--${normalized}">${escapeHtml(formatStatus(safeStatus))}</span>`;
 }
 
 function metricBadge(text) {
     return text && text !== "н/д" ? `<span class="metric-badge">${escapeHtml(text)}</span>` : `<span class="muted">н/д</span>`;
 }
 
-function sourceFilesDetails(files = []) {
-    if (!Array.isArray(files) || !files.length) return "";
+function sourceFilesDetails(files = [], asSection = false) {
+    files = cleanList(files);
+    if (!files.length) {
+        return asSection
+            ? `<section class="technical-group"><h5>Исходные файлы</h5><p class="technical-empty">Нет дополнительных технических сведений.</p></section>`
+            : "";
+    }
     const first = files.slice(0, 5);
     return `
         <details class="source-files-details">
@@ -2960,21 +3307,17 @@ async function refreshSavedDatasets() {
         }
         const rows = items.map((item) => {
             const classes = Array.isArray(item.classes) ? item.classes.join(", ") : (item.classes || "нет");
-            const pre = item.preprocessing_summary || {};
-            const preConfig = item.preprocessing_config || {};
-            const baseline = pre.baseline || preConfig.baseline?.method || pre.config?.baseline?.method || "off";
-            const smoothing = pre.smoothing || preConfig.smoothing?.method || pre.config?.smoothing?.method || "off";
-            const normalization = pre.normalization || preConfig.normalization?.method || pre.config?.normalization?.method || "off";
             const preprocessingText = item.version === "processed"
-                ? [methodLabel(baseline), methodLabel(smoothing), methodLabel(normalization)].filter((v) => v && v !== "выключено").join(" + ") || "processed"
-                : "raw";
+                ? formatPreprocessingSummary(item.preprocessing_summary || item.preprocessing_config || "processed")
+                : "без предобработки";
+            const isActive = (activeSavedDatasetId && item.dataset_id === activeSavedDatasetId) || (activeDatasetId && (item.dataset_id === activeDatasetId || item.source_dataset_id === activeDatasetId));
             return `
-            <tr data-saved-dataset-id="${escapeHtml(item.dataset_id)}">
-                <td class="dataset-name-cell" title="${escapeHtml(item.dataset_name || item.dataset_id)}"><strong>${escapeHtml(shortText(item.dataset_name || item.dataset_id, 52))}</strong><br><span class="muted">${escapeHtml(shortText(item.dataset_id, 16))}</span></td>
+            <tr data-saved-dataset-id="${escapeHtml(item.dataset_id)}" class="${isActive ? "is-selected saved-dataset-active-row" : ""}">
+                <td class="dataset-name-cell" title="${escapeHtml(item.dataset_name || item.dataset_id)}"><strong>${escapeHtml(shortText(item.dataset_name || item.dataset_id, 52))}</strong>${isActive ? ` <span class="ui-badge ui-badge--success">Используется</span>` : ""}<br><span class="muted">${escapeHtml(shortText(item.dataset_id, 16))}</span></td>
                 <td>${versionBadge(item.version || "raw")}</td>
                 <td>${escapeHtml(item.n_samples ?? "н/д")}</td>
                 <td>${escapeHtml(item.n_features ?? "н/д")}</td>
-                <td>${escapeHtml(item.target_column || "нет")}<br><span class="muted">${escapeHtml(item.target_type || "")}</span></td>
+                <td>${escapeHtml(formatTargetName(item.target_column || "none"))}<br><span class="muted">${escapeHtml(formatTask(item.target_type || ""))}</span></td>
                 <td title="${escapeHtml(classes)}">${escapeHtml(shortText(classes, 44))}</td>
                 <td title="${escapeHtml(preprocessingText)}">${escapeHtml(shortText(preprocessingText, 36))}</td>
                 <td>${escapeHtml(formatDateTime(item.created_at))}</td>
@@ -3008,7 +3351,7 @@ async function saveCurrentDataset() {
     }
     const version = saveDatasetVersionInput?.value === "processed" ? "processed" : "raw";
     if (version === "processed" && !processedDatasetReady) {
-        showToast("Processed-версия ещё не создана.", "warning");
+        showToast("Предобработанная версия ещё не создана.", "warning");
         return;
     }
     const response = await fetchWithTimeout("/analysis/saved-datasets/save", {
@@ -3031,17 +3374,21 @@ async function useSavedDataset(savedId) {
     const data = await responseJsonOrError(response, "Не удалось загрузить сохранённый датасет.");
     if (!response.ok) throw new Error(humanError(data, "Не удалось загрузить сохранённый датасет."));
     importedDatasetId = data.dataset_id;
+    activeSavedDatasetId = savedId;
     importedDatasetSummary = data.summary;
-    processedDatasetReady = Boolean(data.summary?.has_processed);
+    const selectedVersion = data.version === "processed" ? "processed" : "raw";
+    processedDatasetReady = Boolean(data.summary?.has_processed || selectedVersion === "processed");
     if (trainDatasetVersionInput) {
         Array.from(trainDatasetVersionInput.options).forEach((option) => {
             if (option.value === "processed") option.disabled = !processedDatasetReady;
         });
+        trainDatasetVersionInput.value = selectedVersion;
     }
     if (datasetPreviewVersionInput) {
         Array.from(datasetPreviewVersionInput.options).forEach((option) => {
             if (option.value === "processed") option.disabled = !processedDatasetReady;
         });
+        datasetPreviewVersionInput.value = selectedVersion;
     }
     renderDatasetReady(data.summary);
     renderDatasetSummary(data.summary);
@@ -3049,9 +3396,10 @@ async function useSavedDataset(savedId) {
     if (data.preview) {
         renderDatasetPreviewPlot(datasetPreviewContainerId(), data.preview, { linesCount: prePlotLimitInput?.value || "5", selectionStrategy: safeDatasetPreviewStrategy(prePlotStrategyInput?.value || "balanced_by_class") });
     }
-    if (trainDatasetVersionInput) trainDatasetVersionInput.value = data.version || "raw";
     setActiveDataset(importedDatasetId, importedDatasetSummary);
-    showToast("Сохранённый датасет выбран для анализа.", "success");
+    activateSavedDatasetUx(importedDatasetSummary, selectedVersion);
+    await refreshSavedDatasets();
+    showToast("Датасет загружен и готов к обучению модели", "success");
 }
 
 async function deleteSavedDataset(savedId) {
@@ -3081,6 +3429,52 @@ function downloadSavedDataset(savedId, format) {
     window.location.href = `/analysis/saved-datasets/${encodeURIComponent(savedId)}/download?format=${encodeURIComponent(format || "csv")}`;
 }
 
+function datasetDisplayName(summary = null, fallbackId = "") {
+    return summary?.metadata?.dataset_name || summary?.dataset_name || summary?.source_file_name || fallbackId || "датасет";
+}
+
+function datasetClassesText(summary = null) {
+    const distribution = summary?.class_distribution || {};
+    if (Object.keys(distribution).length) {
+        return Object.entries(distribution).map(([cls, count]) => `${cls} — ${count}`).join(", ");
+    }
+    const classes = summary?.classes || summary?.metadata?.classes || [];
+    if (Array.isArray(classes) && classes.length) return classes.join(", ");
+    return "";
+}
+
+function datasetTargetDetails(summary = null) {
+    if (!summary?.target_name) return "целевая переменная не задана";
+    if (summary.target_type === "numeric") {
+        const range = summary.target_min !== undefined || summary.target_max !== undefined
+            ? `диапазон ${formatNumber(summary.target_min)}–${formatNumber(summary.target_max)}`
+            : "числовая";
+        const levels = summary.target_unique_count !== undefined ? `, уровней: ${summary.target_unique_count}` : "";
+        return `${formatTargetName(summary.target_name)} · ${range}${levels}`;
+    }
+    const classes = datasetClassesText(summary);
+    return `${formatTargetName(summary.target_name)}${classes ? ` · классы: ${classes}` : ""}`;
+}
+
+function availableTasksText(summary = importedDatasetSummary) {
+    return analysisTaskDefinitions(summary)
+        .filter((item) => item.enabled)
+        .map((item) => formatTask(item.goal))
+        .filter(Boolean)
+        .join(", ") || "визуальный анализ, кластеризация";
+}
+
+function preprocessingSummaryForDataset(summary = null, version = "raw") {
+    if (version !== "processed") return "без предобработки";
+    return formatPreprocessingSummary(
+        summary?.preprocessing_summary ||
+        summary?.preprocessing_config ||
+        summary?.metadata?.preprocessing_summary ||
+        summary?.metadata?.preprocessing_config ||
+        "processed"
+    );
+}
+
 async function downloadPreprocessingConfig() {
     if (!importedDatasetId || !processedDatasetReady) {
         alert("Сначала примените предобработку.");
@@ -3107,6 +3501,7 @@ function setActiveDataset(datasetId, summary = null) {
     if (!datasetId) {
         activeDatasetBadge.classList.remove("loaded-badge--ok");
         activeDatasetBadge.classList.add("loaded-badge--empty");
+        activeDatasetBadge.classList.remove("active-dataset-plaque");
         activeDatasetBadge.textContent = "Импортированный датасет не выбран. Можно загрузить файл вручную.";
         if (trainFileInput) {
             trainFileInput.disabled = false;
@@ -3116,13 +3511,102 @@ function setActiveDataset(datasetId, summary = null) {
     }
     activeDatasetBadge.classList.remove("loaded-badge--empty");
     activeDatasetBadge.classList.add("loaded-badge--ok");
-    const version = trainDatasetVersionInput?.value === "processed" ? "предобработанная версия" : "исходная версия";
-    const name = summary?.metadata?.dataset_name || summary?.dataset_name || datasetId;
-    activeDatasetBadge.textContent = `Источник данных: ${name}, ${version}. Спектров: ${summary?.n_samples ?? "н/д"}, признаков: ${summary?.n_features ?? "н/д"}.`;
+    activeDatasetBadge.classList.add("active-dataset-plaque");
+    const version = trainDatasetVersionInput?.value === "processed" ? "processed" : "raw";
+    const name = datasetDisplayName(summary, datasetId);
+    const preprocessingText = preprocessingSummaryForDataset(summary, version);
+    const warnings = summary?.technical_warnings || summary?.warnings || [];
+    const summaryLine = [
+        shortText(name, 72),
+        formatDatasetVersion(version),
+        `${summary?.n_samples ?? "н/д"} спектров`,
+        `${summary?.n_features ?? "н/д"} признаков`,
+        version === "processed"
+            ? `предобработка: ${shortText(preprocessingText, 72)}`
+            : `целевая переменная: ${formatTargetName(summary?.target_name || "none")}`,
+    ].filter(Boolean).join(" · ");
+    activeDatasetBadge.innerHTML = `
+        <div class="active-dataset-plaque__title"><span class="active-dataset-plaque__check">✓</span> Активный датасет загружен: <strong title="${escapeHtml(name)}">${escapeHtml(shortText(name, 72))}</strong></div>
+        <div class="active-dataset-plaque__summary" title="${escapeHtml(summaryLine)}">${escapeHtml(summaryLine)}</div>
+        <div class="active-dataset-plaque__grid">
+            <span>версия: <strong>${escapeHtml(formatDatasetVersion(version))}</strong></span>
+            <span>спектров: <strong>${escapeHtml(summary?.n_samples ?? "н/д")}</strong></span>
+            <span>признаков: <strong>${escapeHtml(summary?.n_features ?? "н/д")}</strong></span>
+            <span>целевая переменная: <strong>${escapeHtml(formatTargetName(summary?.target_name || "none"))}</strong></span>
+            <span title="${escapeHtml(datasetTargetDetails(summary))}">target: <strong>${escapeHtml(shortText(datasetTargetDetails(summary), 72))}</strong></span>
+            <span title="${escapeHtml(availableTasksText(summary))}">доступные задачи: <strong>${escapeHtml(shortText(availableTasksText(summary), 72))}</strong></span>
+            ${version === "processed" ? `<span class="active-dataset-plaque__wide" title="${escapeHtml(preprocessingText)}">предобработка: <strong>${escapeHtml(shortText(preprocessingText, 96))}</strong></span>` : ""}
+            ${warnings.length ? `<span class="active-dataset-plaque__wide active-dataset-plaque__warning">предупреждения: ${escapeHtml(shortText(warnings.join("; "), 120))}</span>` : ""}
+        </div>
+    `;
     if (trainFileInput) {
         trainFileInput.disabled = true;
     }
     if (manualTrainUploadRow) manualTrainUploadRow.style.display = "none";
+}
+
+function setSavedDatasetPreprocessingCollapsed(summary = importedDatasetSummary, version = "raw") {
+    if (!preprocessingCard) return;
+    preprocessingCard.style.display = "";
+    preprocessingCard.classList.add("preprocessing-card--collapsed");
+    let note = preprocessingCard.querySelector(".saved-dataset-collapse-note");
+    if (!note) {
+        note = document.createElement("div");
+        note.className = "saved-dataset-collapse-note loaded-badge loaded-badge--ok";
+        const title = preprocessingCard.querySelector("h3");
+        if (title?.nextSibling) {
+            preprocessingCard.insertBefore(note, title.nextSibling);
+        } else {
+            preprocessingCard.prepend(note);
+        }
+    }
+    const preprocessingText = preprocessingSummaryForDataset(summary, version);
+    note.innerHTML = `
+        <span>Предобработка свернута. Используется сохранённая версия датасета: <strong>${escapeHtml(formatDatasetVersion(version))}</strong>${version === "processed" ? ` · ${escapeHtml(preprocessingText)}` : ""}</span>
+        <button type="button" class="btn btn-secondary btn-mini" data-expand-preprocessing>Развернуть предобработку</button>
+    `;
+}
+
+function expandPreprocessingBlock() {
+    if (!preprocessingCard) return;
+    preprocessingCard.classList.remove("preprocessing-card--collapsed");
+    preprocessingCard.style.display = "";
+    preprocessingCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function activateSavedDatasetUx(summary = importedDatasetSummary, version = "raw") {
+    const importSection = document.getElementById("import-section");
+    if (importSection) {
+        importSection.style.display = "";
+        importSection.querySelectorAll(":scope > .card, :scope > .collapsible-content > .card").forEach((card) => {
+            const keepCompact = ["saved-datasets-card", "preprocessing-card"].includes(card.id);
+            card.style.display = keepCompact ? "" : "none";
+        });
+    }
+    if (importResultCard) importResultCard.style.display = "none";
+    if (datasetReadyCard) datasetReadyCard.style.display = "none";
+    if (datasetValidationResult) datasetValidationResult.textContent = "";
+    if (datasetCheckSummary) datasetCheckSummary.textContent = "";
+    if (datasetPreviewStatus) datasetPreviewStatus.textContent = "";
+    if (datasetAndorHint) {
+        datasetAndorHint.style.display = "none";
+        datasetAndorHint.textContent = "";
+    }
+    setSavedDatasetPreprocessingCollapsed(summary, version);
+    setSectionStatus(
+        "saved-datasets-card",
+        "success",
+        `Активный датасет: ${datasetDisplayName(summary, importedDatasetId)} · ${formatDatasetVersion(version)}`
+    );
+    markStepDone("import");
+    markStepDone("check");
+    setWorkflowStepStatus("preprocess", version === "processed" ? "done" : "skipped");
+    setWorkflowStepStatus("train", "active");
+    renderAnalysisRecommendations(summary);
+    renderAnalysisWorkflowGuide(summary);
+    updateModelModeUI();
+    renderAnalysisRunSummary();
+    document.getElementById("training-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function useImportedDatasetForTraining() {
@@ -3147,12 +3631,17 @@ function resetDatasetState() {
     importedDatasetId = null;
     importedDatasetSummary = null;
     activeDatasetId = null;
+    activeSavedDatasetId = null;
     processedDatasetReady = false;
 }
 
 function resetPreprocessingState() {
     lastPreprocessingPreview = null;
-    if (preprocessingCard) preprocessingCard.style.display = "none";
+    if (preprocessingCard) {
+        preprocessingCard.style.display = "none";
+        preprocessingCard.classList.remove("preprocessing-card--collapsed");
+        preprocessingCard.querySelector(".saved-dataset-collapse-note")?.remove();
+    }
     if (preprocessingResult) preprocessingResult.textContent = "";
     if (preprocessingConfigView) preprocessingConfigView.textContent = "";
     if (datasetExportProcessedCsvBtn) datasetExportProcessedCsvBtn.disabled = true;
@@ -3219,11 +3708,12 @@ function resetAnalysisWorkflow(reason = "new-file") {
         });
     }
     if (datasetReadyCard) datasetReadyCard.style.display = "none";
-    document.querySelectorAll(".workflow-tab--done").forEach((tab) => {
-        tab.classList.remove("workflow-tab--done");
+    document.querySelectorAll(".workflow-tab--done, .workflow-tab--skipped").forEach((tab) => {
+        tab.classList.remove("workflow-tab--done", "workflow-tab--skipped");
         const state = tab.querySelector(".step-state");
-        if (state) state.textContent = "not-started";
+        if (state) state.textContent = "не начато";
     });
+    setWorkflowStepStatus("import", "active");
     if (reason === "new-file") {
         showToast("Выбран новый файл. Предыдущий датасет и результаты анализа сброшены.", "warning");
     }
@@ -3247,7 +3737,14 @@ function updateDatasetFileHint() {
         datasetPreviewResult.textContent = "Загрузите Excel, ZIP или набор TXT/CSV/ESP файлов.";
         return;
     }
-    datasetPreviewResult.textContent = `Выбрано файлов: ${files.length}\n${files.map((file) => `${file.name} (${Math.round(file.size / 1024)} KB)`).join("\n")}`;
+    const firstFiles = files.slice(0, 5).map((file) => `${file.name} (${Math.round(file.size / 1024)} KB)`);
+    const allFiles = files.map((file) => `${file.name} (${Math.round(file.size / 1024)} KB)`);
+    datasetPreviewResult.innerHTML = `
+        <div>Выбрано файлов: ${files.length}</div>
+        <div class="muted">Первые 5: ${escapeHtml(firstFiles.join("; "))}</div>
+        ${files.length > 5 ? `<button type="button" class="btn btn-ghost btn-mini" data-show-selected-files>Показать все</button>
+        <div class="selected-file-list--all" style="display:none;">${escapeHtml(allFiles.join("\n"))}</div>` : ""}
+    `;
 }
 
 async function previewFile() {
@@ -3750,6 +4247,7 @@ async function trainModel() {
             preprocessing_config: useProcessed ? buildPreprocessingConfig() : {},
             model_type: modelTypeInput.value,
             model_name: modelNameInput.value || "",
+            save_model_after_training: saveModelAfterTrainingInput?.checked !== false,
             analysis_goal: analysisGoalInput?.value || "",
             n_components: nComponentsInput.value ? Number(nComponentsInput.value) : null,
             params: getFrontendModelParams(modelTypeInput.value),
@@ -3803,6 +4301,7 @@ async function trainModel() {
     formData.append("file", file);
     formData.append("model_type", modelTypeInput.value);
     formData.append("model_name", modelNameInput.value || "");
+    formData.append("save_model_after_training", saveModelAfterTrainingInput?.checked !== false ? "true" : "false");
 
     if (targetValuesInput.value.trim()) {
         formData.append("target_values", targetValuesInput.value.trim());
@@ -3899,25 +4398,27 @@ async function refreshModels() {
 
     const rows = data.map((model) => {
         const metrics = model.metrics || {};
+        const modelTitle = ANALYSIS_METHOD_INFO[model.model_type]?.[0] || model.model_type || "н/д";
+        const modelName = model.model_name || model.model_id || "н/д";
         const metricText = metrics.f1_macro !== undefined
             ? `F1=${Number(metrics.f1_macro).toFixed(3)}`
             : metrics.r2 !== undefined
-                ? `R2=${Number(metrics.r2).toFixed(3)}`
+                ? `R²=${Number(metrics.r2).toFixed(3)}`
                 : metrics.explained_variance_total !== undefined
-                    ? `EV=${Number(metrics.explained_variance_total).toFixed(3)}`
+                    ? `${formatMetricName("explained_variance_total")}=${Number(metrics.explained_variance_total).toFixed(3)}`
                     : metrics.silhouette_score !== undefined
-                        ? `silhouette=${Number(metrics.silhouette_score).toFixed(3)}`
+                        ? `${formatMetricName("silhouette_score")}=${Number(metrics.silhouette_score).toFixed(3)}`
                         : metrics.inertia !== undefined
-                            ? `inertia=${Number(metrics.inertia).toFixed(3)}`
+                            ? `${formatMetricName("inertia")}=${Number(metrics.inertia).toFixed(3)}`
                             : "";
         const key = `${model.model_type}:${model.model_id}`;
         const isActive = selectedModel?.modelType === model.model_type && selectedModel?.modelId === model.model_id;
         return `
             <tr data-model-key="${escapeHtml(key)}" class="${isActive ? "is-selected" : ""}">
-                <td><strong>${escapeHtml(model.model_name || model.model_id)}</strong><br><span class="muted">${escapeHtml(model.model_id || "")}</span></td>
-                <td>${escapeHtml(model.model_type || "н/д")}</td>
-                <td>${escapeHtml(model.task_type || "analysis")}</td>
-                <td>${escapeHtml(model.target_name || "нет")}</td>
+                <td class="model-name-cell" title="${escapeHtml(modelName)}"><strong>${escapeHtml(shortText(modelName, 46))}</strong><br><span class="muted">${escapeHtml(shortText(model.model_id || "", 16))}</span></td>
+                <td>${escapeHtml(modelTitle)}</td>
+                <td>${escapeHtml(formatTask(model.task_type || "analysis"))}</td>
+                <td>${escapeHtml(formatTargetName(model.target_name || "none"))}</td>
                 <td>${metricBadge(metricText)}</td>
                 <td class="dataset-name-cell" title="${escapeHtml(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д")}">${escapeHtml(shortText(model.dataset_name || model.source_dataset_name || model.dataset_id || "н/д", 52))}<br><span class="muted">${escapeHtml(shortText(model.dataset_id || "", 8))}</span></td>
                 <td>${versionBadge(model.dataset_version || "raw")}</td>
@@ -3964,9 +4465,9 @@ async function refreshRuns() {
             return `
                 <tr data-run-id="${escapeHtml(run.run_id)}">
                     <td title="${escapeHtml(title)}"><strong>${escapeHtml(shortText(title, 44))}</strong><br><span class="muted">${escapeHtml(shortText(run.run_id, 18))}</span></td>
-                    <td>${escapeHtml(run.run_type || "analysis")}</td>
+                    <td>${escapeHtml(formatTask(run.run_type || "analysis"))}</td>
                     <td>${escapeHtml(run.best_method || run.method || "н/д")}</td>
-                    <td>${escapeHtml(run.target_name || "нет")}</td>
+                    <td>${escapeHtml(formatTargetName(run.target_name || "none"))}</td>
                     <td>${metricBadge(String(metric))}</td>
                     <td>${statusBadge(run.status || "success")}</td>
                     <td>${escapeHtml(formatDateTime(run.created_at))}</td>
@@ -4155,22 +4656,22 @@ async function openSavedModelMetadata(modelArg = null) {
 }
 
 function modelMetadataText(meta = {}) {
-    const preprocessing = meta.preprocessing || {};
+    const preprocessing = meta.preprocessing_config || meta.preprocessing || {};
     return [
         "Сведения о модели:",
         `название: ${meta.model_name || "н/д"}`,
-        `тип: ${meta.model_type || "н/д"}`,
-        `задача: ${meta.task_type || "н/д"}`,
+        `тип: ${ANALYSIS_METHOD_INFO[meta.model_type]?.[0] || meta.model_type || "н/д"}`,
+        `задача: ${formatTask(meta.task_type || "analysis")}`,
         `id запуска: ${meta.run_id || "н/д"}`,
         `создана: ${formatDateTime(meta.created_at) || "н/д"}`,
         `датасет: ${meta.dataset_name || meta.dataset_id || "н/д"}${meta.dataset_id ? ` (${shortText(meta.dataset_id, 8)})` : ""}`,
-        `целевая переменная: ${meta.target_name || "н/д"} (${meta.target_type || "н/д"})`,
+        `целевая переменная: ${formatTargetName(meta.target_name || "none")} (${formatTask(meta.target_type || "none")})`,
         `метрики: ${JSON.stringify(meta.metrics || {}, null, 2)}`,
         `использовались обработанные данные: ${meta.used_processed_data ? "да" : "нет"}`,
         `классы: ${(meta.classes || []).join(", ") || "н/д"}`,
         `диапазон оси: ${(meta.axis_range || []).join("–") || "н/д"}`,
         `ожидается признаков: ${meta.feature_count || meta.n_features || "н/д"}`,
-        `предобработка: базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`,
+        `предобработка: ${formatPreprocessingSummary(preprocessing)}`,
     ].join("\n");
 }
 
@@ -4179,41 +4680,270 @@ function renderModelMetadataCard(meta = {}) {
     const preprocessing = meta.preprocessing_config || meta.preprocessing || {};
     const metrics = meta.metrics || {};
     const classes = Array.isArray(meta.classes) ? meta.classes.join(", ") : (meta.classes || "н/д");
+    const modelTitle = ANALYSIS_METHOD_INFO[meta.model_type]?.[0] || meta.model_type || "н/д";
+    const taskTitle = formatTask(meta.task_type || meta.model_type || "analysis");
+    const datasetTitle = meta.dataset_name || meta.dataset_id || "н/д";
+    const dataVersion = meta.dataset_version || (meta.used_processed_data ? "processed" : "raw");
+    const quality = evaluateModelQuality(metrics, meta.task_type || meta.model_type || "analysis", meta.n_samples || meta.sample_count, Array.isArray(meta.classes) ? meta.classes.length : null, {
+        class_distribution: meta.class_distribution,
+        validation_status: meta.validation?.status || meta.validation_status,
+        no_validation: meta.validation?.status && meta.validation.status !== "ok",
+    });
     const metricsHtml = Object.keys(metrics).length
         ? `<div class="metric-list">${Object.entries(metrics).map(([key, value]) => `
-            <span class="metric-chip"><span>${escapeHtml(key)}</span><strong>${escapeHtml(typeof value === "number" ? value.toFixed(4) : value)}</strong></span>
+            <span class="metric-chip"><span>${escapeHtml(formatMetricName(key))}</span><strong>${escapeHtml(typeof value === "number" ? value.toFixed(4) : value)}</strong></span>
         `).join("")}</div>`
         : "н/д";
-    const tiles = [
-        ["Тип", meta.model_type || "н/д"],
-        ["Задача", meta.task_type || "н/д"],
-        ["Целевая переменная", meta.target_name || "н/д"],
-        ["Классы", classes || "н/д"],
-        ["Датасет", meta.dataset_name || meta.dataset_id || "н/д"],
-        ["Предобработка", `базовая линия=${methodLabel(preprocessing.baseline?.method)}, сглаживание=${methodLabel(preprocessing.smoothing?.method)}, нормализация=${methodLabel(preprocessing.normalization?.method)}`],
-        ["Ожидается признаков", meta.feature_count || meta.n_features || "н/д"],
-        ["Диапазон оси", Array.isArray(meta.axis_range) ? meta.axis_range.join("-") : "н/д"],
-    ];
+    const modelParams = meta.model_params || meta.parameters || meta.params || {};
+    const paramsHtml = Object.keys(modelParams).length
+        ? `<div class="metadata-pairs">${Object.entries(modelParams).map(([key, value]) => `
+            <span title="${escapeHtml(key)}"><b>${escapeHtml(formatParamName(key))}</b>: ${escapeHtml(typeof value === "object" && value !== null ? JSON.stringify(value) : value)}</span>
+        `).join("")}</div>`
+        : `<span class="muted">Параметры не указаны в metadata.</span>`;
+    const axisRange = Array.isArray(meta.axis_range)
+        ? meta.axis_range.join("–")
+        : [meta.axis_min, meta.axis_max].filter((v) => v !== undefined && v !== null).join("–") || "н/д";
     modelMetadataCard.innerHTML = `
         <h4>Метаданные модели</h4>
-        <div class="metadata-grid">
-            ${tiles.map(([label, value]) => `
-                <div class="metadata-tile">
-                    <div class="metadata-label">${escapeHtml(label)}</div>
-                    <div class="metadata-value" title="${escapeHtml(value)}">${escapeHtml(shortText(value, 72))}</div>
-                </div>
-            `).join("")}
+        <div class="model-metadata-head" title="${escapeHtml(`${modelTitle} · ${taskTitle} · ${datasetTitle}`)}">
+            <strong>${escapeHtml(modelTitle)}</strong>
+            <span>${escapeHtml(taskTitle)}</span>
+            <span>target: ${escapeHtml(formatTargetName(meta.target_name || "none"))}</span>
+            <span>dataset: ${escapeHtml(shortText(datasetTitle, 48))}</span>
+            <span>${escapeHtml(formatDatasetVersion(dataVersion))}</span>
         </div>
-        <div class="metadata-metrics">
-            <div class="metadata-label">Метрики</div>
-            ${metricsHtml}
+        <div class="metadata-metrics">${metricsHtml}</div>
+        ${renderQualityBlock(quality)}
+        <div class="metadata-readable-grid">
+            <section>
+                <h5>Общие сведения</h5>
+                <p><b>Название:</b> ${escapeHtml(meta.model_name || "н/д")}</p>
+                <p><b>Дата создания:</b> ${escapeHtml(formatDateTime(meta.created_at) || "н/д")}</p>
+                <p><b>Обучающий датасет:</b> <span title="${escapeHtml(datasetTitle)}">${escapeHtml(shortText(datasetTitle, 64))}</span></p>
+                <p><b>Целевая переменная:</b> ${escapeHtml(formatTargetName(meta.target_name || "none"))}</p>
+            </section>
+            <section>
+                <h5>Данные</h5>
+                <p><b>Спектров:</b> ${escapeHtml(meta.n_samples || meta.sample_count || "н/д")}</p>
+                <p><b>Признаков:</b> ${escapeHtml(meta.feature_count || meta.n_features || meta.expected_feature_count || "н/д")}</p>
+                <p><b>Диапазон оси:</b> ${escapeHtml(axisRange)}</p>
+                <p><b>Классы / target:</b> <span title="${escapeHtml(classes)}">${escapeHtml(shortText(classes, 64))}</span></p>
+            </section>
+            <section>
+                <h5>Предобработка</h5>
+                <p>${escapeHtml(formatPreprocessingSummary(preprocessing))}</p>
+            </section>
+            <section>
+                <h5>Параметры модели</h5>
+                ${paramsHtml}
+            </section>
         </div>
         <details>
-            <summary>Показать технические сведения</summary>
+            <summary>Показать raw JSON</summary>
             <pre>${escapeHtml(JSON.stringify(meta, null, 2))}</pre>
         </details>
     `;
     modelMetadataCard.style.display = "block";
+}
+
+const PARAMETER_HELP = {
+    "n-components": "Сколько скрытых признаков будет использовано моделью. Слишком малое число может упростить модель, слишком большое — привести к переобучению.",
+    "model-n-clusters": "Сколько групп алгоритм должен найти в спектрах.",
+    "random-state": "Фиксирует случайность, чтобы результат можно было повторить.",
+    "test-size": "Часть данных, которая не используется при обучении и нужна для проверки качества модели.",
+    "model-max-depth": "Ограничивает сложность дерева решений. Без ограничения модель может переобучиться.",
+    "model-n-estimators": "Количество деревьев в Random Forest. Больше деревьев обычно повышает устойчивость, но увеличивает время расчёта.",
+    "model-c": "Параметр штрафа за ошибки. Большое значение делает модель строже к ошибкам, но может повысить риск переобучения.",
+    "model-gamma": "Определяет влияние отдельных объектов в ядровых методах.",
+    "model-kernel": "Тип ядра, задающий способ разделения данных.",
+    "model-epsilon": "Допустимая зона ошибки для SVR.",
+    "pre-als-lambda": "Жёсткость базовой линии. Чем больше значение, тем более плавной получается линия фона.",
+    "pre-als-p": "Асимметрия подгонки базовой линии.",
+    "pre-als-iterations": "Сколько раз алгоритм уточняет базовую линию.",
+    "pre-sg-window": "Размер участка спектра, по которому выполняется сглаживание.",
+    "pre-sg-polyorder": "Степень полинома, которым аппроксимируется окно сглаживания.",
+    "pre-normalization-method": "SNV центрирует спектр и масштабирует его по стандартному отклонению. После SNV отрицательные значения допустимы.",
+    "pre-crop-min": "Нижняя граница информативной области спектра.",
+    "pre-crop-max": "Верхняя граница информативной области спектра.",
+    "do-validation": "Валидация train/test откладывает часть данных для проверки качества модели.",
+};
+PARAMETER_HELP["validation-enabled-toggle"] = "Валидация train/test откладывает часть данных для независимой проверки качества модели.";
+PARAMETER_HELP["save-model-after-training"] = "Если включено, обученная модель будет сохранена в списке сохранённых моделей.";
+
+function addHelpTooltip(label, text) {
+    if (!label || !text || label.querySelector(".help-tooltip")) return;
+    const tip = document.createElement("span");
+    tip.className = "help-tooltip";
+    tip.tabIndex = 0;
+    tip.setAttribute("aria-label", text);
+    tip.innerHTML = `?<span class="help-tooltip__content">${escapeHtml(text)}</span>`;
+    let row = label.querySelector(":scope > .field-label-row");
+    if (!row) {
+        row = document.createElement("span");
+        row.className = "field-label-row";
+        const textWrap = document.createElement("span");
+        textWrap.className = "field-label-text";
+        const firstTextNode = Array.from(label.childNodes).find((node) => node.nodeType === Node.TEXT_NODE && node.textContent.trim());
+        const inlineText = label.querySelector(":scope > span:not(.field-hint):not(.help-tooltip):not(.help-tooltip__content):not(.pre-status-badge)");
+        if (firstTextNode) {
+            textWrap.textContent = firstTextNode.textContent.trim();
+            firstTextNode.textContent = "";
+        } else if (inlineText) {
+            textWrap.textContent = inlineText.textContent.trim();
+            inlineText.remove();
+        } else {
+            textWrap.textContent = label.getAttribute("aria-label") || "";
+        }
+        row.appendChild(textWrap);
+        label.prepend(row);
+    }
+    row.appendChild(tip);
+}
+
+function enhanceParameterTooltips() {
+    Object.entries(PARAMETER_HELP).forEach(([id, text]) => {
+        const input = document.getElementById(id);
+        addHelpTooltip(input?.closest("label"), text);
+    });
+    document.querySelectorAll(".preprocessing-method-card[data-pre-section]").forEach((label) => {
+        const section = label.dataset.preSection;
+        const help = {
+            baseline: "Используйте коррекцию фона, если у спектров есть плавный флуоресцентный фон.",
+            smoothing: "Используйте сглаживание для шумных спектров, но не задавайте слишком большое окно.",
+            normalization: "Используйте нормализацию, если спектры отличаются общей интенсивностью.",
+            crop: "Обрезка диапазона оставляет только выбранную информативную область спектра.",
+        }[section];
+        addHelpTooltip(label, help);
+    });
+}
+
+function createPreprocessingToggle(selectId, labelText, enabledValue) {
+    const select = document.getElementById(selectId);
+    const label = select?.closest("label");
+    if (!select || !label || label.querySelector(`[data-toggle-for="${selectId}"]`)) return;
+    const toggle = document.createElement("label");
+    toggle.className = "inline-switch";
+    toggle.innerHTML = `<input type="checkbox" data-toggle-for="${escapeHtml(selectId)}"> <span>${escapeHtml(labelText)}</span>`;
+    label.insertBefore(toggle, select);
+    const checkbox = toggle.querySelector("input");
+    const syncFromSelect = () => { checkbox.checked = select.value !== "off" && select.value !== "false"; };
+    const syncToSelect = () => {
+        if (checkbox.checked && (select.value === "off" || select.value === "false")) select.value = enabledValue;
+        if (!checkbox.checked) select.value = selectId === "pre-crop-enabled" ? "false" : "off";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    checkbox.addEventListener("change", syncToSelect);
+    select.addEventListener("change", syncFromSelect);
+    syncFromSelect();
+    addHelpTooltip(toggle, PARAMETER_HELP[selectId]);
+}
+
+function enhanceParameterSwitches() {
+    createPreprocessingToggle("pre-baseline-method", "Использовать коррекцию фона", "als");
+    createPreprocessingToggle("pre-smoothing-method", "Использовать сглаживание", "savgol");
+    createPreprocessingToggle("pre-normalization-method", "Использовать нормализацию", "snv");
+    createPreprocessingToggle("pre-crop-enabled", "Обрезать диапазон", "true");
+    const syncValidationState = () => {
+        if (!doValidationInput || !validationEnabledToggle) return;
+        validationEnabledToggle.checked = doValidationInput.value === "true";
+        if (testSizeInput) testSizeInput.disabled = !validationEnabledToggle.checked;
+        if (testSizeWrap) testSizeWrap.classList.toggle("is-disabled", !validationEnabledToggle.checked);
+    };
+    if (doValidationInput && validationEnabledToggle && !validationEnabledToggle.dataset.bound) {
+        validationEnabledToggle.dataset.bound = "true";
+        validationEnabledToggle.addEventListener("change", () => {
+            doValidationInput.value = validationEnabledToggle.checked ? "true" : "false";
+            doValidationInput.dispatchEvent(new Event("change", { bubbles: true }));
+            syncValidationState();
+        });
+        doValidationInput.addEventListener("change", syncValidationState);
+        syncValidationState();
+    }
+    const validationSelect = document.getElementById("do-validation");
+    const validationLabel = validationSelect?.closest("label");
+    if (false && validationSelect && validationLabel && !validationLabel.querySelector("[data-validation-toggle]")) {
+        const toggle = document.createElement("label");
+        toggle.className = "inline-switch";
+        toggle.innerHTML = `<input type="checkbox" data-validation-toggle checked> <span>Использовать валидацию train/test</span>`;
+        validationLabel.insertBefore(toggle, validationSelect);
+        const checkbox = toggle.querySelector("input");
+        checkbox.addEventListener("change", () => {
+            validationSelect.value = checkbox.checked ? "true" : "false";
+            validationSelect.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        validationSelect.addEventListener("change", () => { checkbox.checked = validationSelect.value === "true"; });
+    }
+}
+
+const COLLAPSIBLE_MODULES = [
+    ["import-section", "Импорт датасета"],
+    ["standard-import-card", "Структура датасета"],
+    ["dataset-ready-card", "Датасет готов к анализу"],
+    ["preprocessing-card", "Предобработка перед анализом"],
+    ["saved-datasets-card", "Сохранённые датасеты"],
+    ["training-section", "Обучение модели"],
+    ["models-section", "Сохранённые модели"],
+    ["model-apply-card", "Применение модели к новым данным"],
+    ["results-section", "Результаты"],
+    ["runs-section", "История экспериментов"],
+];
+
+function moduleSummary(id) {
+    if (id === "training-section" && activeDatasetId) {
+        return `Датасет: ${datasetDisplayName(importedDatasetSummary, activeDatasetId)} · ${importedDatasetSummary?.n_samples || "н/д"} спектров · ${importedDatasetSummary?.n_features || "н/д"} признаков · готово`;
+    }
+    if (id === "preprocessing-card") {
+        const version = trainDatasetVersionInput?.value === "processed" ? "processed" : "raw";
+        return `Предобработка: ${preprocessingSummaryForDataset(importedDatasetSummary, version)}`;
+    }
+    if (id === "model-apply-card" && selectedModel) return `Модель: ${selectedModel.modelId || "загружена"}`;
+    if (id === "results-section" && lastPredictionRows.length) return `Результаты: обработано ${lastPredictionRows.length} файлов`;
+    if (id === "dataset-ready-card" && importedDatasetSummary) return `Датасет: ${datasetDisplayName(importedDatasetSummary, importedDatasetId)} · готово`;
+    return "Свернуто. Нажмите, чтобы развернуть.";
+}
+
+function initCollapsibleModules() {
+    COLLAPSIBLE_MODULES.forEach(([id, fallbackTitle]) => {
+        const section = document.getElementById(id);
+        if (!section || section.dataset.collapsibleReady) return;
+        const heading = section.querySelector(":scope > h2, :scope > h3");
+        if (!heading) return;
+        section.dataset.collapsibleReady = "1";
+        const content = document.createElement("div");
+        content.className = "collapsible-content";
+        const nodes = Array.from(section.childNodes).filter((node) => node !== heading);
+        nodes.forEach((node) => content.appendChild(node));
+        const header = document.createElement("div");
+        header.className = "collapsible-header";
+        const title = heading.textContent.trim() || fallbackTitle;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "collapse-toggle";
+        btn.setAttribute("aria-expanded", "true");
+        btn.innerHTML = `<span class="collapse-arrow">▼</span> ${escapeHtml(title)}`;
+        const summary = document.createElement("div");
+        summary.className = "collapsed-summary";
+        summary.hidden = true;
+        header.appendChild(btn);
+        heading.replaceWith(header);
+        section.appendChild(summary);
+        section.appendChild(content);
+        const key = `analysis.collapsed.${id}`;
+        const apply = (collapsed) => {
+            section.classList.toggle("is-collapsed", collapsed);
+            content.hidden = collapsed;
+            summary.hidden = !collapsed;
+            summary.textContent = moduleSummary(id);
+            btn.setAttribute("aria-expanded", String(!collapsed));
+            btn.querySelector(".collapse-arrow").textContent = collapsed ? "▶" : "▼";
+        };
+        btn.addEventListener("click", () => {
+            const collapsed = !section.classList.contains("is-collapsed");
+            localStorage.setItem(key, collapsed ? "1" : "0");
+            apply(collapsed);
+        });
+        apply(localStorage.getItem(key) === "1");
+    });
 }
 
 async function deleteSelectedModel(modelArg = null) {
@@ -4496,7 +5226,7 @@ async function renderImportedSpectraPreview(datasetId) {
         if (!response.ok) throw new Error(humanError(data, "Не удалось построить предпросмотр спектров."));
         lastDatasetPreviewData = data;
         renderDatasetPreviewPlot(datasetPreviewContainerId(), data, { linesCount: limit, selectionStrategy: strategy });
-        if (datasetPreviewStatus) datasetPreviewStatus.textContent = `График обновлён (${version}).`;
+        if (datasetPreviewStatus) datasetPreviewStatus.textContent = `График обновлён (${formatDatasetVersion(version)}).`;
     } catch (error) {
         if (datasetPreviewStatus) datasetPreviewStatus.textContent = error.message;
         showToast(error.message, "error");
@@ -4507,7 +5237,10 @@ async function renderImportedSpectraPreview(datasetId) {
 function initAnalysisPage() {
     initTheme();
     tidyAnalysisLayout();
-    bindClick("preview-btn", previewFile);
+    initCollapsibleModules();
+    enhanceParameterTooltips();
+    enhanceParameterSwitches();
+    bindClick("preview-btn", () => runUiAction(document.getElementById("preview-btn"), "Проверка...", previewFile, "Файл проверен.").catch(() => {}));
     bindClick("train-btn", trainModel);
     bindClick("refresh-models-btn", refreshModels);
     bindClick("load-model-btn", loadSelectedModel);
@@ -4515,7 +5248,7 @@ function initAnalysisPage() {
     bindClick("download-model-meta-btn", () => downloadSelectedModel("metadata"));
     bindClick("download-model-zip-btn", () => downloadSelectedModel("zip"));
     bindClick("delete-model-btn", deleteSelectedModel);
-    bindClick("upload-model-btn", uploadOwnModel);
+    bindClick("upload-model-btn", () => runUiAction(document.getElementById("upload-model-btn"), "Загрузка...", uploadOwnModel, "").catch(() => {}));
     bindClick("infer-btn", runInference);
     bindClick("load-targets-btn", loadTargetsFromFile);
     bindClick("dataset-preview-btn", previewDatasetImport);
@@ -4523,21 +5256,27 @@ function initAnalysisPage() {
     bindClick("dataset-import-btn", importDataset);
     bindClick("dataset-metadata-download-btn", downloadDatasetMetadata);
     bindClick("dataset-config-download-btn", downloadImportConfig);
-    bindClick("dataset-use-btn", useImportedDatasetForTraining);
+    bindClick("dataset-use-btn", () => runUiAction(datasetUseBtn, "Подготовка...", async () => useImportedDatasetForTraining(), "Датасет выбран для обучения.").catch(() => {}));
     bindClick("choose-other-dataset-btn", () => {
+        if (activeDatasetId) {
+            const ok = confirm("Активный датасет будет сброшен, импорт и проверка снова откроются. Продолжить?");
+            if (!ok) return;
+        }
         resetDatasetImport();
+        const importSection = document.getElementById("import-section");
+        if (importSection) importSection.style.display = "";
         document.getElementById("import-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
     bindClick("use-saved-dataset-btn", () => {
         document.getElementById("saved-datasets-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
-    bindClick("dataset-show-plot-btn", () => {
+    bindClick("dataset-show-plot-btn", () => runUiAction(datasetShowPlotBtn, "Построение...", async () => {
         if (!importedDatasetId) {
             showToast("warning", "Сначала загрузите или импортируйте датасет.");
             return;
         }
-        renderImportedSpectraPreview(importedDatasetId);
-    });
+        await renderImportedSpectraPreview(importedDatasetId);
+    }, "График обновлён.").catch(() => {}));
     bindClick("compact-preprocessing-plot-btn", () => {
         if (!importedDatasetId) {
             showToast("warning", "Сначала загрузите правильный датасет.");
@@ -4552,7 +5291,7 @@ function initAnalysisPage() {
     bindClick("dataset-export-processed-csv-btn", () => exportImportedDataset("csv", "processed"));
     bindClick("dataset-export-processed-xlsx-btn", () => exportImportedDataset("xlsx", "processed"));
     bindClick("dataset-export-processed-zip-btn", () => exportImportedDataset("zip", "processed"));
-    bindClick("save-dataset-btn", () => saveCurrentDataset().catch((error) => showToast(error.message, "error")));
+    bindClick("save-dataset-btn", () => runUiAction(document.getElementById("save-dataset-btn"), "Сохранение...", saveCurrentDataset, "").catch(() => {}));
     bindClick("refresh-saved-datasets-btn", () => refreshSavedDatasets());
     bindClick("preprocessing-config-download-btn", downloadPreprocessingConfig);
     bindClick("preprocessing-reset-raman-btn", resetPreprocessingToRaman);
@@ -4620,7 +5359,7 @@ function initAnalysisPage() {
         const downloadSavedDatasetId = target?.getAttribute?.("data-download-saved-dataset");
         const renameSavedDatasetId = target?.getAttribute?.("data-rename-saved-dataset");
         const targetCandidateIndex = target?.closest?.("[data-target-candidate-index]")?.getAttribute?.("data-target-candidate-index");
-        if (useSavedDatasetId) useSavedDataset(useSavedDatasetId).catch((error) => showToast(error.message, "error"));
+        if (useSavedDatasetId) runUiAction(target.closest("button"), "Загрузка...", () => useSavedDataset(useSavedDatasetId), "").catch(() => {});
         if (deleteSavedDatasetId) deleteSavedDataset(deleteSavedDatasetId).catch((error) => showToast(error.message, "error"));
         if (downloadSavedDatasetId) downloadSavedDataset(downloadSavedDatasetId, target?.getAttribute?.("data-format") || "csv");
         if (renameSavedDatasetId) renameSavedDataset(renameSavedDatasetId, target?.getAttribute?.("data-current-name") || "").catch((error) => showToast(error.message, "error"));
@@ -4641,6 +5380,9 @@ function initAnalysisPage() {
                 fullList.hidden = false;
                 target.style.display = "none";
             }
+        }
+        if (target?.hasAttribute?.("data-expand-preprocessing")) {
+            expandPreprocessingBlock();
         }
         if (target?.id === "copy-json-btn" && textResult) {
             navigator.clipboard?.writeText(textResult.textContent || "");
@@ -4801,6 +5543,12 @@ function initAnalysisPage() {
         document.getElementById("model-max-depth"),
     ].forEach((input) => {
         if (input) input.addEventListener("change", () => {
+            if (input === trainDatasetVersionInput && activeDatasetId) {
+                setActiveDataset(activeDatasetId, importedDatasetSummary);
+                if (preprocessingCard?.classList.contains("preprocessing-card--collapsed")) {
+                    setSavedDatasetPreprocessingCollapsed(importedDatasetSummary, trainDatasetVersionInput.value === "processed" ? "processed" : "raw");
+                }
+            }
             renderMethodParamsSimple(selectedAnalysisMethod || modelTypeInput?.value || "pca");
             renderAnalysisRunSummary();
         });
