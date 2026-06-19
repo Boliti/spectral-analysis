@@ -90,7 +90,7 @@ def _build_search(model_type: str, x_train: np.ndarray, y_train: np.ndarray, bas
             return None
         estimator = Pipeline([
             ("scaler", StandardScaler()),
-            ("svc", SVC(probability=False, class_weight=class_weight, random_state=int(random_state))),
+            ("svc", SVC(class_weight=class_weight, random_state=int(random_state))),
         ])
         if quick_mode:
             grid = {"svc__C": [1, 10], "svc__kernel": ["rbf"], "svc__gamma": ["scale"]}

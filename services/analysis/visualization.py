@@ -18,18 +18,45 @@ def _scatter(x: List[float], y: List[float], text: List[str], name: str) -> Dict
 
 
 def pca_plot(scores: np.ndarray, title: str) -> Dict[str, Any]:
-    x = scores[:, 0].tolist() if scores.shape[1] >= 1 else [0.0] * scores.shape[0]
-    y = scores[:, 1].tolist() if scores.shape[1] >= 2 else [0.0] * scores.shape[0]
-    text = [f"sample_{i + 1}" for i in range(scores.shape[0])]
-    return {
-        "data": [_scatter(x, y, text, "PCA scores")],
-        "layout": {
-            "title": title,
-            "xaxis": {"title": "PC1"},
-            "yaxis": {"title": "PC2"},
-            "template": "plotly_white",
-        },
-    }
+    # If scores has two or more components, plot PC1 vs PC2 with axis labels.
+    if scores.ndim == 2 and scores.shape[1] >= 2:
+        x = scores[:, 0].tolist()
+        y = scores[:, 1].tolist()
+        text = [f"sample_{i + 1}" for i in range(scores.shape[0])]
+        return {
+            "data": [_scatter(x, y, text, "PCA scores")],
+            "layout": {
+                "title": title,
+                "xaxis": {"title": "PC1"},
+                "yaxis": {"title": "PC2"},
+                "template": "plotly_white",
+            },
+        }
+    # If only one component, produce a simple 1D scatter of PC1 across samples.
+    if scores.ndim == 2 and scores.shape[1] == 1:
+        pc1 = scores[:, 0].tolist()
+        text = [f"sample_{i + 1}" for i in range(scores.shape[0])]
+        return {
+            "data": [
+                {
+                    "type": "scatter",
+                    "mode": "markers",
+                    "x": list(range(1, len(pc1) + 1)),
+                    "y": pc1,
+                    "text": text,
+                    "name": "PC1",
+                    "marker": {"size": 10, "opacity": 0.85},
+                }
+            ],
+            "layout": {
+                "title": title,
+                "xaxis": {"title": "Sample index"},
+                "yaxis": {"title": "PC1"},
+                "template": "plotly_white",
+            },
+        }
+    # Fallback empty plot
+    return {"data": [], "layout": {"title": title, "template": "plotly_white"}}
 
 
 def pls_regression_plot(y_true: np.ndarray, y_pred: np.ndarray, title: str) -> Dict[str, Any]:

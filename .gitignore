@@ -57,6 +57,7 @@ results/reports/*
 *.zip
 *.7z
 
+
 # Logs and temporary files
 logs/
 *.log
@@ -64,6 +65,7 @@ tmp/
 temp/
 *.tmp
 *.bak
+verification_compare_*.json
 
 # Editor and local tool state
 .vscode/
@@ -88,3 +90,8 @@ Thumbs.db
 *.ckpt
 *.pt
 *.onnx
+
+
+
+
+

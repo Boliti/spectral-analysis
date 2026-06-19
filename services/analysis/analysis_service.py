@@ -397,7 +397,9 @@ class AnalysisService:
             imbalance = bool(np.min(counts) / np.max(counts) < 0.3)
 
         if model_type == "pca":
-            params.setdefault("n_components", min(2, n_samples, n_features))
+            # Prefer at least 2 components by default when possible (do not force PCA to 1).
+            # Cap by features only here; actual model fit will further cap by available samples.
+            params.setdefault("n_components", min(2, n_features))
         elif model_type == "plsda":
             params.setdefault("n_components", min(2, max(1, class_count), max(1, n_samples - 1), n_features))
         elif model_type == "pls":
@@ -908,7 +910,6 @@ class AnalysisService:
                 "reason": "implemented only for PLS-DA and PLS Regression in current version",
             }
         permutation["time_sec"] = round(time.perf_counter() - permutation_start, 6)
-        _stage("bootstrap")
         bootstrap_start = time.perf_counter()
         if bootstrap_enabled:
             bootstrap = self._bootstrap_ci_classification(y_true=y_true_cls, y_pred=y_pred_cls, random_state=random_state, n_bootstrap=n_bootstrap)
@@ -1075,8 +1076,8 @@ class AnalysisService:
             observed = true_cv["mean_std"]["r2"]["mean"]
             metric_name = "r2"
         else:
-            observed = true_cv["mean_std"]["accuracy"]["mean"]
-            metric_name = "accuracy"
+            observed = true_cv["mean_std"]["f1_macro"]["mean"]
+            metric_name = "f1_macro"
 
         perm_scores: List[float] = []
         y_arr = np.asarray(y, dtype=object)
@@ -1636,7 +1637,29 @@ class AnalysisService:
         for key, title in [("slit_width_um", "PCA: цвет по ширине щели"), ("grating_lines_mm", "PCA: цвет по решётке")]:
             labels = self._metadata_series(dataset, key)
             if len(labels) == scores.shape[0]:
-                plots.append(self._scatter_scores_plot(scores, labels, title, "PC1", "PC2", sample_ids))
+                # Only create PC1-PC2 scatter when at least two components are available
+                if scores.shape[1] >= 2:
+                    plots.append(self._scatter_scores_plot(scores, labels, title, "PC1", "PC2", sample_ids))
+                elif scores.shape[1] == 1:
+                    # Fallback: 1D plot of PC1 colored by metadata labels
+                    pc1 = scores[:, 0].tolist()
+                    labels_list = [str(v) for v in labels]
+                    traces: List[Dict[str, Any]] = []
+                    for lbl in sorted(set(labels_list)):
+                        idx = [i for i, value in enumerate(labels_list) if value == lbl]
+                        traces.append(
+                            {
+                                "type": "scatter",
+                                "mode": "markers",
+                                "name": lbl,
+                                "x": [i + 1 for i in idx],
+                                "y": [pc1[i] for i in idx],
+                                "marker": {"size": 10, "opacity": 0.85},
+                                "text": [sample_ids[i] for i in idx],
+                                "hovertemplate": "sample_id: %{text}<br>PC1: %{y:.4g}<extra></extra>",
+                            }
+                        )
+                    plots.append({"data": traces, "layout": {"title": title + " (PC1)", "xaxis": {"title": "Sample index"}, "yaxis": {"title": "PC1"}, "template": "plotly_white"}})
         return plots
 
     def _metadata_series(self, dataset: SpectrumDataset, key: str) -> List[Any]:
@@ -1659,8 +1682,12 @@ class AnalysisService:
         sample_ids = dataset.sample_names or [f"sample_{idx + 1}" for idx in range(x.shape[0])]
         if x.ndim == 2 and x.shape[0] >= 2 and x.shape[1] >= 2:
             x_scaled = (x - np.nanmean(x, axis=0)) / np.where(np.nanstd(x, axis=0) == 0, 1, np.nanstd(x, axis=0))
-            scores = PCA(n_components=2).fit_transform(np.nan_to_num(x_scaled))
-            plots.append(self._scatter_scores_plot(scores, labels_str, f"{model_type}: PCA-проекция кластеров", "PC1", "PC2", sample_ids))
+            pca = PCA(n_components=2)
+            scores = pca.fit_transform(np.nan_to_num(x_scaled))
+            ratios = pca.explained_variance_ratio_.tolist() if hasattr(pca, "explained_variance_ratio_") else []
+            x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
+            y_title = f"PC2 ({ratios[1] * 100:.1f}% дисперсии)" if len(ratios) > 1 else "PC2"
+            plots.append(self._scatter_scores_plot(scores, labels_str, f"{model_type}: PCA-проекция кластеров", x_title, y_title, sample_ids))
         plots.append(class_count_plot(labels_str, f"{model_type}: распределение кластеров"))
         axis = np.asarray(dataset.spectral_axis, dtype=float)
         traces = []
@@ -1700,9 +1727,38 @@ class AnalysisService:
             if scores.size == 0:
                 return {}
             ratios = [float(v) for v in result.get("explained_variance_ratio", [])]
-            x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
-            y_title = f"PC2 ({ratios[1] * 100:.1f}% дисперсии)" if len(ratios) > 1 else "PC2"
-            return self._scatter_scores_plot(scores, result.get("target"), "PCA: PC1-PC2", x_title, y_title, result.get("sample_ids"))
+            # If we have at least two components, produce the usual PC1-PC2 scatter
+            if scores.ndim == 2 and scores.shape[1] >= 2:
+                x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
+                y_title = f"PC2 ({ratios[1] * 100:.1f}% дисперсии)" if len(ratios) > 1 else "PC2"
+                return self._scatter_scores_plot(scores, result.get("target"), "PCA: PC1-PC2", x_title, y_title, result.get("sample_ids"))
+            # If only one component was calculated, do not draw a PC1-PC2 scatter (points would lie on PC2=0).
+            # Instead, render a simple 1D plot of PC1 across samples (or a histogram if preferred).
+            if scores.ndim == 2 and scores.shape[1] == 1:
+                pc1 = scores[:, 0].tolist()
+                samples = result.get("sample_ids") or [f"sample_{i + 1}" for i in range(len(pc1))]
+                x_title = f"PC1 ({ratios[0] * 100:.1f}% дисперсии)" if len(ratios) > 0 else "PC1"
+                # Build a vertical scatter: sample index vs PC1 to visualise spread in one dimension
+                return {
+                    "data": [
+                        {
+                            "type": "scatter",
+                            "mode": "markers",
+                            "x": list(range(1, len(pc1) + 1)),
+                            "y": pc1,
+                            "text": samples,
+                            "hovertemplate": "sample_id: %{text}<br>PC1: %{y:.4g}<extra></extra>",
+                            "marker": {"size": 10, "opacity": 0.85},
+                        }
+                    ],
+                    "layout": {
+                        "title": "PCA: PC1 (1D)",
+                        "xaxis": {"title": "Sample index"},
+                        "yaxis": {"title": x_title},
+                        "template": "plotly_white",
+                    },
+                }
+            return {}
 
         if normalized in {"pls", "svr"}:
             if phase == "training" and "y_true" in result and "y_pred" in result:

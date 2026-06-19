@@ -369,7 +369,6 @@ class SVMClassifier(SklearnClassifierModel):
                         kernel=self.config.kernel,
                         C=float(self.config.C),
                         gamma=self.config.gamma,
-                        probability=False,
                         class_weight=self.config.class_weight,
                         random_state=int(self.config.random_state),
                     ),

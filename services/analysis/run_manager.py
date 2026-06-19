@@ -28,7 +28,7 @@ STAGE_LABELS: Dict[str, str] = {
 # If a run's status hasn't been updated for this long and it never reached a
 # terminal state, the server most likely restarted/crashed mid-computation -
 # report it as interrupted rather than "running" forever.
-STALE_AFTER_SECONDS = 90.0
+STALE_AFTER_SECONDS = 1800.0
 
 
 class AnalysisRunManager:
@@ -341,11 +341,19 @@ class AnalysisRunManager:
                     updated_at = None
                 if updated_at is not None:
                     age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                    payload["status_age_sec"] = age
+
                     if age > STALE_AFTER_SECONDS:
-                        payload["status"] = "error"
-                        payload["stage"] = "interrupted"
-                        payload["stage_label"] = STAGE_LABELS["interrupted"]
-                        payload["error"] = "Расчёт прерван: сервер был перезапущен или процесс остановлен во время вычислений."
+                        # Не считаем расчёт прерванным автоматически.
+                        # Во время тяжёлых ML-операций статус может долго не обновляться,
+                        # хотя процесс реально продолжает выполняться.
+                        payload["stale"] = True
+                        payload["warning"] = (
+                            "Статус давно не обновлялся. Расчёт может всё ещё выполняться, "
+                            "особенно во время GridSearchCV, k-fold, bootstrap или permutation test."
+                        )
+                    else:
+                        payload["stale"] = False
         return payload
 
     def save(self, run: Dict[str, Any]) -> Dict[str, Any]:
