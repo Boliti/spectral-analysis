@@ -74,3 +74,17 @@ temp/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Large binary datasets and scientific arrays
+*.npz
+*.npy
+*.h5
+*.hdf5
+
+# Exported CSVs and other data dumps (adjust if you want some CSVs tracked)
+*.csv
+
+# Model artifacts
+*.ckpt
+*.pt
+*.onnx
