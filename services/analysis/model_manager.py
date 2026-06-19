@@ -44,9 +44,12 @@ class ModelManager:
         safe_model_id = self._safe_name(model_id, "model_id")
         return model_dir / f"{safe_model_id}.joblib", model_dir / f"{safe_model_id}_meta.json"
 
-    def save(self, model_type: str, model_obj: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        model_id = self._next_model_id(model_type)
+    def save(self, model_type: str, model_obj: Any, metadata: Dict[str, Any], model_id: Optional[str] = None) -> Dict[str, Any]:
+        explicit_id = bool(model_id)
+        model_id = self._safe_name(model_id, "model_id") if model_id else self._next_model_id(model_type)
         model_path, meta_path = self._paths(model_type, model_id)
+        if explicit_id and (model_path.exists() or meta_path.exists()):
+            raise ValueError(f"model_id '{model_id}' уже существует для model_type '{model_type}' — отказ от перезаписи.")
 
         payload = {
             "model_id": model_id,

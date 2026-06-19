@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
+import tracemalloc
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 from sklearn.metrics import (
@@ -26,10 +28,40 @@ from services.analysis.dataset_importer import SpectralDataset as ImportedSpectr
 from services.analysis.dataset_importer import preprocess_matrix
 from services.analysis.spectrum_loader import SpectrumDataset, parse_spectrum_file, parse_target_values
 from services.analysis.visualization import class_count_plot, pca_plot, pls_regression_plot, residual_plot
+from services.analysis.hyperparameter_search import run_hyperparameter_search
+
+try:
+    import psutil  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None  # type: ignore
 
 
 def _timestamp_name() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+class _MemoryProbe:
+    """Measures peak memory for one operation; prefers psutil RSS, falls back to tracemalloc."""
+
+    def __init__(self) -> None:
+        self._process = psutil.Process() if psutil is not None else None
+        self._start_rss = self._process.memory_info().rss if self._process is not None else None
+        self._tracemalloc_started_here = False
+        if self._process is None and not tracemalloc.is_tracing():
+            tracemalloc.start()
+            self._tracemalloc_started_here = True
+
+    def peak_mb(self) -> float:
+        if self._process is not None:
+            current_rss = self._process.memory_info().rss
+            delta = max(0, current_rss - (self._start_rss or 0))
+            return round(delta / (1024 * 1024), 3)
+        _current, peak = tracemalloc.get_traced_memory()
+        return round(peak / (1024 * 1024), 3)
+
+    def close(self) -> None:
+        if self._tracemalloc_started_here:
+            tracemalloc.stop()
 
 
 class AnalysisService:
@@ -114,129 +146,238 @@ class AnalysisService:
         random_state: int = 42,
         model_params: Optional[Dict[str, Any]] = None,
         metadata_extra: Optional[Dict[str, Any]] = None,
+        hyperparameter_search: bool = False,
+        refit_on_full_data: bool = True,
+        model_id_override: Optional[str] = None,
+        kfold_enabled: bool = True,
+        bootstrap_enabled: bool = True,
+        permutation_enabled: Optional[bool] = None,
+        n_splits: int = 5,
+        n_bootstrap: int = 1000,
+        n_permutations: int = 200,
+        quick_mode: bool = False,
+        on_stage: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        x = dataset.x
-        y = self._parse_supervised_targets(model_type, raw_targets, dataset.sample_count)
-        self._validate_method_inputs(model_type=model_type, x=x, y=y)
+        def _stage(name: str) -> None:
+            if on_stage is not None:
+                on_stage(name)
 
-        normalized_model_type = self._normalize_model_type(model_type)
-        params = self._default_model_params(
-            model_type=normalized_model_type,
-            x=x,
-            y=y,
-            n_components=n_components,
-            random_state=random_state,
-            provided=model_params,
-        )
-        validation = self._run_validation(
-            model_type=normalized_model_type,
-            x=x,
-            y=y,
-            n_components=params.get("n_components"),
-            model_params=params,
-            do_validation=do_validation,
-            test_size=test_size,
-            random_state=random_state,
-        )
+        memory_probe = _MemoryProbe()
+        total_start = time.perf_counter()
+        try:
+            _stage("preparing_data")
+            x = dataset.x
+            y = self._parse_supervised_targets(model_type, raw_targets, dataset.sample_count)
+            self._validate_method_inputs(model_type=model_type, x=x, y=y)
 
-        model = create_model(model_type=model_type, n_components=params.get("n_components"), model_params=params)
-        model.fit(x, y)
-        result = model.training_result(x, y)
-        if y is not None:
-            result["target"] = [str(value) for value in np.asarray(y).tolist()]
-        if dataset.sample_names:
-            result["sample_ids"] = dataset.sample_names
-        task_type = self._task_type(model.model_type)
-        metrics = self._extract_metrics(model.model_type, result, validation)
-        warnings = []
-        if isinstance(validation, dict):
-            warnings.extend(validation.get("warnings", []) or [])
-        warnings.extend(metrics.get("warnings", []) or [])
-        warnings.extend(result.get("warnings", []) or [])
+            normalized_model_type = self._normalize_model_type(model_type)
+            params = self._default_model_params(
+                model_type=normalized_model_type,
+                x=x,
+                y=y,
+                n_components=n_components,
+                random_state=random_state,
+                provided=model_params,
+            )
+            validation, eval_model, tuned_params, validation_time_sec = self._run_validation(
+                model_type=normalized_model_type,
+                x=x,
+                y=y,
+                n_components=params.get("n_components"),
+                model_params=params,
+                do_validation=do_validation,
+                test_size=test_size,
+                random_state=random_state,
+                hyperparameter_search=hyperparameter_search,
+                kfold_enabled=kfold_enabled,
+                bootstrap_enabled=bootstrap_enabled,
+                permutation_enabled=permutation_enabled,
+                n_splits=n_splits,
+                n_bootstrap=n_bootstrap,
+                n_permutations=n_permutations,
+                quick_mode=quick_mode,
+                on_stage=_stage,
+            )
 
-        timestamp_name = _timestamp_name()
-        display_name = (model_name or "").strip() or f"{model.model_type}_{timestamp_name}"
-        axis = np.asarray(dataset.spectral_axis if dataset.spectral_axis is not None else np.arange(dataset.feature_count), dtype=float)
-        saved_params = model.get_params()
-        saved_classes = saved_params.get("classes") or result.get("classes", [])
-        metadata = {
-            "model_name": display_name,
-            "display_name": display_name,
-            "task_type": task_type,
-            "input_shape": [int(dataset.sample_count), int(dataset.feature_count)],
-            "feature_count": dataset.feature_count,
-            "expected_feature_count": dataset.feature_count,
-            "sample_count": dataset.sample_count,
-            "source_format": dataset.source_format,
-            "file_format": dataset.file_format,
-            "preprocessing": {},
-            "classes": saved_classes,
-            "class_labels": saved_classes,
-            "class_mapping": {str(idx): str(label) for idx, label in enumerate(saved_classes)},
-            "target_column": None,
-            "spectral_axis": axis.astype(float).tolist(),
-            "axis": axis.astype(float).tolist(),
-            "axis_min": float(np.min(axis)) if axis.size else None,
-            "axis_max": float(np.max(axis)) if axis.size else None,
-            "axis_range": [float(np.min(axis)), float(np.max(axis))] if axis.size else [None, None],
-            "feature_order": [f"{float(value):.12g}" for value in axis],
-            "params": saved_params,
-            "model_params": params,
-            "target_type": self._target_kind(y),
-            "validation_config": {
-                "enabled": bool(do_validation),
-                "test_size": float(max(0.1, min(0.5, test_size))),
-                "random_state": int(random_state),
-            },
-            "validation": validation,
-            "metrics": metrics,
-        }
-        if metadata_extra:
-            metadata.update(metadata_extra)
-        metadata["feature_count"] = int(metadata.get("feature_count") or dataset.feature_count)
-        metadata["expected_feature_count"] = int(metadata.get("expected_feature_count") or metadata["feature_count"])
-        if not metadata.get("spectral_axis"):
-            metadata["spectral_axis"] = axis.astype(float).tolist()
-        if not metadata.get("axis"):
-            metadata["axis"] = axis.astype(float).tolist()
-        metadata["target_column"] = metadata.get("target_name") or metadata.get("target_column")
-        metadata["preprocessing_applied"] = bool(metadata.get("used_processed_data"))
+            _stage("fit")
+            fit_start = time.perf_counter()
+            if refit_on_full_data or eval_model is None:
+                model = create_model(model_type=model_type, n_components=tuned_params.get("n_components"), model_params=tuned_params)
+                model.fit(x, y)
+                training_policy = {
+                    "validation_model": "trained_on_train_split" if eval_model is not None else "not_available",
+                    "saved_model": "refit_on_full_dataset",
+                    "refit_on_full_data": True,
+                    "metrics_source": "holdout_test_split" if eval_model is not None else "not_available",
+                }
+            else:
+                model = eval_model
+                training_policy = {
+                    "validation_model": "trained_on_train_split",
+                    "saved_model": "trained_on_train_split",
+                    "refit_on_full_data": False,
+                    "metrics_source": "holdout_test_split",
+                }
+            fit_time_sec = time.perf_counter() - fit_start
 
-        saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata)
-        plot_source = result
-        if task_type == "classification":
-            validation_classes = validation.get("classes") if isinstance(validation, dict) else []
-            plot_source = {
-                "confusion_matrix": metrics.get("confusion_matrix"),
-                "classes": metrics.get("classes") or validation_classes,
-                "y_pred": metrics.get("y_pred") or [],
-                "y_true": metrics.get("y_true") or [],
-                "sample_ids": [],
+            result = model.training_result(x, y)
+            if y is not None:
+                result["target"] = [str(value) for value in np.asarray(y).tolist()]
+            if dataset.sample_names:
+                result["sample_ids"] = dataset.sample_names
+            task_type = self._task_type(model.model_type)
+            metrics = self._extract_metrics(model.model_type, result, validation)
+            outputs_bundle = self._build_outputs(task_type, result, metrics, validation)
+            outputs = outputs_bundle["outputs"]
+            test_outputs = outputs_bundle["test_outputs"]
+            full_dataset_outputs = outputs_bundle["full_dataset_outputs"]
+            warnings = []
+            if isinstance(validation, dict):
+                warnings.extend(validation.get("warnings", []) or [])
+            warnings.extend(metrics.get("warnings", []) or [])
+            warnings.extend(result.get("warnings", []) or [])
+
+            predict_start = time.perf_counter()
+            try:
+                model.predict(x[:1])
+            except Exception:
+                pass
+            predict_time_one_sample_ms = (time.perf_counter() - predict_start) * 1000.0
+
+            timestamp_name = _timestamp_name()
+            display_name = (model_name or "").strip() or f"{model.model_type}_{timestamp_name}"
+            axis = np.asarray(dataset.spectral_axis if dataset.spectral_axis is not None else np.arange(dataset.feature_count), dtype=float)
+            saved_params = model.get_params()
+            saved_classes = saved_params.get("classes") or result.get("classes", [])
+
+            hyperparameter_search_report = validation.get("hyperparameter_search") if isinstance(validation, dict) else None
+            if not isinstance(hyperparameter_search_report, dict):
+                hyperparameter_search_report = {"enabled": bool(hyperparameter_search), "status": "skipped", "reason": "Validation disabled or unavailable", "best_params_source": "manual_or_default"}
+
+            performance = {
+                "import_time_sec": dataset.metadata.get("import_time_sec") if isinstance(dataset.metadata, dict) else None,
+                "preprocessing_time_sec": dataset.metadata.get("preprocessing_time_sec") if isinstance(dataset.metadata, dict) else None,
+                "hyperparameter_search_time_sec": hyperparameter_search_report.get("search_time_sec"),
+                "fit_time_sec": round(fit_time_sec, 6),
+                "validation_time_sec": round(validation_time_sec, 6) if validation_time_sec is not None else None,
+                "kfold_time_sec": (validation.get("kfold") or {}).get("time_sec") if isinstance(validation, dict) else None,
+                "bootstrap_time_sec": (validation.get("bootstrap") or {}).get("time_sec") if isinstance(validation, dict) else None,
+                "permutation_time_sec": (validation.get("permutation_test") or {}).get("time_sec") if isinstance(validation, dict) else None,
+                "predict_time_one_sample_ms": round(predict_time_one_sample_ms, 4),
+                "export_time_sec": None,
+                "total_time_sec": round(time.perf_counter() - total_start, 6),
+                "peak_memory_mb": memory_probe.peak_mb(),
             }
-        plots = self._build_plots(model.model_type, plot_source, phase="training", dataset=dataset)
-        plot = plots[0] if plots else {}
-        prediction_rows = self._training_prediction_rows(result, dataset.sample_names)
 
-        return {
-            "model_type": model.model_type,
-            "model_name": metadata["model_name"],
-            "task_type": task_type,
-            "saved_model": saved,
-            "result": result,
-            "summary": {
-                "n_samples": int(dataset.sample_count),
-                "n_features": int(dataset.feature_count),
-                "target_type": metadata["target_type"],
+            metadata = {
+                "model_name": display_name,
+                "display_name": display_name,
                 "task_type": task_type,
-            },
-            "metrics": metrics,
-            "predictions": prediction_rows or result.get("y_pred") or result.get("cluster_labels") or result.get("scores") or result.get("y_pred"),
-            "validation": validation,
-            "plot": plot,
-            "plots": plots,
-            "model_metadata": saved,
-            "warnings": warnings,
-        }
+                "input_shape": [int(dataset.sample_count), int(dataset.feature_count)],
+                "feature_count": dataset.feature_count,
+                "expected_feature_count": dataset.feature_count,
+                "sample_count": dataset.sample_count,
+                "source_format": dataset.source_format,
+                "file_format": dataset.file_format,
+                "preprocessing": {},
+                "classes": saved_classes,
+                "class_labels": saved_classes,
+                "class_mapping": {str(idx): str(label) for idx, label in enumerate(saved_classes)},
+                "target_column": None,
+                "spectral_axis": axis.astype(float).tolist(),
+                "axis": axis.astype(float).tolist(),
+                "axis_min": float(np.min(axis)) if axis.size else None,
+                "axis_max": float(np.max(axis)) if axis.size else None,
+                "axis_range": [float(np.min(axis)), float(np.max(axis))] if axis.size else [None, None],
+                "feature_order": [f"{float(value):.12g}" for value in axis],
+                "params": saved_params,
+                "model_params": tuned_params,
+                "best_params": hyperparameter_search_report.get("best_params") if hyperparameter_search_report.get("status") == "ok" else None,
+                "target_type": self._target_kind(y),
+                "validation_config": {
+                    "enabled": bool(do_validation),
+                    "test_size": float(max(0.1, min(0.5, test_size))),
+                    "random_state": int(random_state),
+                },
+                "validation": validation,
+                "metrics": metrics,
+                "outputs": outputs,
+                "test_outputs": test_outputs,
+                "full_dataset_outputs": full_dataset_outputs,
+                "training_policy": training_policy,
+                "training_policy_note": "metrics.confusion_matrix and metrics.* reflect test_outputs (holdout) when validation.status == 'ok'; full_dataset_outputs/outputs are diagnostic-only.",
+                "hyperparameter_search": hyperparameter_search_report,
+                "reproducibility": {
+                    "random_state": int(random_state),
+                    "user_overridden_random_state": int(random_state) != 42,
+                    "numpy_random_seed": int(random_state),
+                },
+                "performance": performance,
+            }
+            if normalized_model_type == "hca":
+                metadata["can_infer_new_samples"] = False
+                metadata.setdefault("limitations", [])
+                metadata["limitations"].append(
+                    "HCA does not support direct inference for new spectra because AgglomerativeClustering has no predict method."
+                )
+            if metadata_extra:
+                metadata.update(metadata_extra)
+            metadata["feature_count"] = int(metadata.get("feature_count") or dataset.feature_count)
+            metadata["expected_feature_count"] = int(metadata.get("expected_feature_count") or metadata["feature_count"])
+            if not metadata.get("spectral_axis"):
+                metadata["spectral_axis"] = axis.astype(float).tolist()
+            if not metadata.get("axis"):
+                metadata["axis"] = axis.astype(float).tolist()
+            metadata["target_column"] = metadata.get("target_name") or metadata.get("target_column")
+            metadata["preprocessing_applied"] = bool(metadata.get("used_processed_data"))
+
+            _stage("saving")
+            saved = self.model_manager.save(model_type=model.model_type, model_obj=model, metadata=metadata, model_id=model_id_override)
+            plot_source = result
+            if task_type == "classification":
+                validation_classes = validation.get("classes") if isinstance(validation, dict) else []
+                plot_source = {
+                    "confusion_matrix": metrics.get("confusion_matrix"),
+                    "classes": metrics.get("classes") or validation_classes,
+                    "y_pred": metrics.get("y_pred") or [],
+                    "y_true": metrics.get("y_true") or [],
+                    "sample_ids": [],
+                }
+            plots = self._build_plots(model.model_type, plot_source, phase="training", dataset=dataset)
+            plot = plots[0] if plots else {}
+            prediction_rows = self._training_prediction_rows(result, dataset.sample_names)
+
+            return {
+                "model_type": model.model_type,
+                "model_name": metadata["model_name"],
+                "task_type": task_type,
+                "saved_model": saved,
+                "result": result,
+                "summary": {
+                    "n_samples": int(dataset.sample_count),
+                    "n_features": int(dataset.feature_count),
+                    "target_type": metadata["target_type"],
+                    "task_type": task_type,
+                },
+                "metrics": metrics,
+                "outputs": outputs,
+                "test_outputs": test_outputs,
+                "full_dataset_outputs": full_dataset_outputs,
+                "legacy_predictions_field": True,
+                "predictions": prediction_rows or result.get("y_pred") or result.get("cluster_labels") or result.get("scores") or result.get("y_pred"),
+                "validation": validation,
+                "training_policy": training_policy,
+                "hyperparameter_search": hyperparameter_search_report,
+                "reproducibility": metadata["reproducibility"],
+                "performance": performance,
+                "best_params": metadata.get("best_params"),
+                "plot": plot,
+                "plots": plots,
+                "model_metadata": saved,
+                "warnings": warnings,
+            }
+        finally:
+            memory_probe.close()
 
     def _default_model_params(
         self,
@@ -268,9 +409,11 @@ class AnalysisService:
             params.setdefault("class_weight", "balanced" if imbalance else None)
         elif model_type == "random_forest":
             params.setdefault("n_estimators", 200)
+            params.setdefault("min_samples_split", 2)
             params.setdefault("class_weight", "balanced" if imbalance else None)
         elif model_type == "decision_tree":
             params.setdefault("max_depth", None)
+            params.setdefault("min_samples_split", 2)
             params.setdefault("class_weight", "balanced" if imbalance else None)
         elif model_type in {"kmeans", "hca"}:
             params.setdefault("n_clusters", class_count if class_count >= 2 else 2)
@@ -305,7 +448,7 @@ class AnalysisService:
                 np.asarray(y, dtype=float)
             except ValueError as exc:
                 raise ValueError("Для регрессии target должен быть числовым.") from exc
-        if normalized not in {"pca", "plsda", "pls", "svm", "random_forest", "decision_tree", "kmeans", "hca", "svr", "mcr_als"}:
+        if normalized not in {"pca", "plsda", "pls", "svm", "random_forest", "decision_tree", "kmeans", "hca", "svr"}:
             raise ValueError(f"Метод {model_type} не поддерживается.")
 
     def _extract_metrics(self, model_type: str, result: Dict[str, Any], validation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -360,7 +503,11 @@ class AnalysisService:
                     "validation_mode": validation.get("status") if isinstance(validation, dict) else "unavailable",
                     "confusion_matrix_total": None,
                     "confusion_matrix_accuracy": None,
-                    "warnings": ["Validation/test confusion_matrix is unavailable; full-dataset confusion_matrix was not used."],
+                    "warnings": [
+                        "Validation did not run, so metrics.confusion_matrix is intentionally null (no honest holdout estimate exists). "
+                        "A full-dataset diagnostic confusion matrix is still available in full_dataset_outputs.confusion_matrix / "
+                        "outputs.confusion_matrix, but it is NOT a substitute for a held-out test metric."
+                    ],
                 }
             )
             return metrics
@@ -380,6 +527,113 @@ class AnalysisService:
                 if key in result
             }
         return {}
+
+    @staticmethod
+    def _full_dataset_outputs(task_type: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Diagnostic predictions for ALL input samples (training data, possibly seen by the model).
+
+        These are NOT held-out test metrics: for supervised methods the model that produced them may
+        have been refit on the very same samples it is predicting here (see training_policy). Use
+        test_outputs for an honest, non-overfit estimate of quality.
+        """
+        note = (
+            "Predictions for all input samples (diagnostic view). The model may have been trained on "
+            "some or all of these same samples (see training_policy) - NOT a held-out test estimate."
+        )
+        if task_type == "classification":
+            return {
+                "type": "classification",
+                "note": note,
+                "y_true": result.get("y_true") or [],
+                "y_pred": result.get("y_pred") or [],
+                "class_labels": result.get("classes") or [],
+                "confusion_matrix": result.get("confusion_matrix") or [],
+            }
+        if task_type == "regression":
+            y_true = result.get("y_true") or []
+            y_pred = result.get("y_pred") or []
+            residuals = []
+            if y_true and y_pred and len(y_true) == len(y_pred):
+                try:
+                    residuals = [float(t) - float(p) for t, p in zip(y_true, y_pred)]
+                except (TypeError, ValueError):
+                    residuals = []
+            return {"type": "regression", "note": note, "y_true": y_true, "y_pred": y_pred, "residuals": residuals}
+        if task_type == "clustering":
+            return {
+                "type": "clustering",
+                "note": "Clustering has no train/test split; cluster assignment covers the full dataset by definition.",
+                "cluster_labels": result.get("cluster_labels") or [],
+                "cluster_distribution": result.get("cluster_distribution") or {},
+            }
+        if task_type == "visualization":
+            return {
+                "type": "pca",
+                "note": "PCA is unsupervised and has no train/test split; scores cover the full dataset.",
+                "scores": result.get("scores") or [],
+                "explained_variance_ratio": result.get("explained_variance_ratio") or [],
+            }
+        return {"type": task_type, "note": note}
+
+    @staticmethod
+    def _test_outputs(task_type: str, validation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Predictions for ONLY the held-out test split produced by holdout validation, when available."""
+        if not isinstance(validation, dict) or validation.get("status") != "ok":
+            reason = validation.get("reason") if isinstance(validation, dict) else "Validation did not run"
+            return {"type": task_type, "status": "unavailable", "reason": reason or "Validation did not run", "note": "No holdout test split was evaluated for this run."}
+        if task_type == "classification":
+            return {
+                "type": "classification",
+                "status": "ok",
+                "note": "Predictions for the held-out test split only (honest, non-overfit estimate).",
+                "y_true": validation.get("y_true") or [],
+                "y_pred": validation.get("y_pred") or [],
+                "class_labels": validation.get("classes") or [],
+                "confusion_matrix": validation.get("confusion_matrix") or [],
+                "train_samples": validation.get("train_samples"),
+                "test_samples": validation.get("test_samples"),
+            }
+        if task_type == "regression":
+            y_true = validation.get("y_true") or []
+            y_pred = validation.get("y_pred") or []
+            residuals = []
+            if y_true and y_pred and len(y_true) == len(y_pred):
+                try:
+                    residuals = [float(t) - float(p) for t, p in zip(y_true, y_pred)]
+                except (TypeError, ValueError):
+                    residuals = []
+            return {
+                "type": "regression",
+                "status": "ok",
+                "note": "Predictions for the held-out test split only (honest, non-overfit estimate).",
+                "y_true": y_true,
+                "y_pred": y_pred,
+                "residuals": residuals,
+                "train_samples": validation.get("train_samples"),
+                "test_samples": validation.get("test_samples"),
+            }
+        return {"type": task_type, "status": "unavailable", "reason": f"{task_type} has no holdout test split"}
+
+    @classmethod
+    def _build_outputs(
+        cls,
+        task_type: str,
+        result: Dict[str, Any],
+        metrics: Dict[str, Any],
+        validation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Builds the test_outputs/full_dataset_outputs split plus a legacy 'outputs' field.
+
+        legacy 'outputs' always mirrors full_dataset_outputs (its historical meaning, before the
+        test/full split existed) and is tagged legacy_outputs_field/outputs_source so old and new
+        consumers can both rely on it without ambiguity about which population it covers.
+        """
+        full_dataset_outputs = cls._full_dataset_outputs(task_type, result)
+        test_outputs = cls._test_outputs(task_type, validation)
+        legacy_outputs = dict(full_dataset_outputs)
+        legacy_outputs["legacy_outputs_field"] = True
+        legacy_outputs["outputs_source"] = "full_dataset_diagnostic"
+        return {"outputs": legacy_outputs, "test_outputs": test_outputs, "full_dataset_outputs": full_dataset_outputs}
 
     @staticmethod
     def _confusion_matrix_total(matrix: Any) -> Optional[int]:
@@ -412,11 +666,39 @@ class AnalysisService:
         do_validation: bool,
         test_size: float,
         random_state: int,
-    ) -> Optional[Dict[str, Any]]:
-        if not do_validation:
-            return {"status": "skipped", "reason": "Validation disabled by user"}
+        hyperparameter_search: bool = False,
+        kfold_enabled: bool = True,
+        bootstrap_enabled: bool = True,
+        permutation_enabled: Optional[bool] = None,
+        n_splits: int = 5,
+        n_bootstrap: int = 1000,
+        n_permutations: int = 200,
+        quick_mode: bool = False,
+        on_stage: Optional[Callable[[str], None]] = None,
+    ):
+        """Returns (validation_dict, eval_model_or_None, tuned_params, validation_time_sec_or_None).
 
-        if model_type in {"pca", "mcr_als", "kmeans", "hca"}:
+        kfold_enabled/bootstrap_enabled toggle those checks on/off (user-controllable from the UI).
+        permutation_enabled is tri-state: None means "auto" (only runs for plsda/pls, as before),
+        True/False is an explicit user override - but the test itself only HAS an implementation for
+        plsda/pls, so True for any other model_type still reports status=skipped with that reason.
+
+        eval_model is the model fitted ONLY on the train split (used for holdout metrics).
+        tuned_params is model_params with hyperparameter-search best_params merged in, when search ran;
+        otherwise it is model_params unchanged. The caller decides whether the FINAL saved model is
+        eval_model itself (refit_on_full_data=False) or a fresh fit on the full dataset with tuned_params
+        (refit_on_full_data=True).
+        """
+        def _stage(name: str) -> None:
+            if on_stage is not None:
+                on_stage(name)
+        base_params = dict(model_params or {})
+        no_search_report = {"enabled": bool(hyperparameter_search), "status": "skipped", "reason": "Validation disabled or unavailable", "best_params_source": "manual_or_default"}
+
+        if not do_validation:
+            return {"status": "skipped", "reason": "Validation disabled by user", "hyperparameter_search": no_search_report}, None, base_params, None
+
+        if model_type in {"pca", "kmeans", "hca"}:
             return {
                 "status": "skipped",
                 "reason": f"{model_type.upper()} does not use supervised holdout metrics",
@@ -424,7 +706,8 @@ class AnalysisService:
                     "Выбранный метод не является supervised-моделью для прогноза класса/концентрации.",
                     "Для надежной количественной валидации используйте PLS (регрессия) или PLS-DA (классификация).",
                 ],
-            }
+                "hyperparameter_search": no_search_report,
+            }, None, base_params, None
 
         if y is None:
             return {
@@ -434,7 +717,8 @@ class AnalysisService:
                     "Для supervised-валидации необходимы истинные target-значения.",
                     "Без target можно выполнить только разведочный анализ.",
                 ],
-            }
+                "hyperparameter_search": no_search_report,
+            }, None, base_params, None
 
         if len(x) < 6:
             return {
@@ -444,11 +728,13 @@ class AnalysisService:
                     "Слишком мало спектров для устойчивой оценки качества модели.",
                     "Рекомендуется расширить выборку минимум до 20-30 образцов.",
                 ],
-            }
+                "hyperparameter_search": no_search_report,
+            }, None, base_params, None
 
+        validation_start = time.perf_counter()
         safe_test_size = float(max(0.1, min(0.5, test_size)))
         stratify = None
-        warnings = []
+        warnings: List[str] = []
 
         if model_type in {"plsda", "svm", "random_forest", "decision_tree"}:
             y_labels = np.asarray(y, dtype=str)
@@ -460,12 +746,14 @@ class AnalysisService:
                     "limitations": [
                         "В датасете только один класс, классификационная задача не определена.",
                     ],
-                }
+                    "hyperparameter_search": no_search_report,
+                }, None, base_params, None
             if np.min(counts) >= 2:
                 stratify = y_labels
             else:
                 warnings.append("Not enough samples in at least one class for stratified split")
 
+        _stage("train_test_split")
         x_train, x_test, y_train, y_test = train_test_split(
             x,
             y,
@@ -474,65 +762,118 @@ class AnalysisService:
             stratify=stratify,
         )
 
-        eval_model = create_model(model_type=model_type, n_components=n_components, model_params=model_params)
+        search_report = {"enabled": bool(hyperparameter_search), "status": "skipped", "reason": "hyperparameter_search disabled by user", "best_params_source": "manual_or_default"}
+        tuned_params = dict(base_params)
+        if hyperparameter_search:
+            _stage("grid_search")
+            search_start = time.perf_counter()
+            search_report = run_hyperparameter_search(
+                model_type=model_type,
+                x_train=x_train,
+                y_train=y_train,
+                base_params=base_params,
+                random_state=random_state,
+                quick_mode=quick_mode,
+            )
+            search_report["search_time_sec"] = round(time.perf_counter() - search_start, 6)
+            if search_report.get("status") == "ok":
+                tuned_params.update(search_report.get("best_params") or {})
+
+        _stage("fit")
+        eval_model = create_model(model_type=model_type, n_components=tuned_params.get("n_components", n_components), model_params=tuned_params)
         eval_model.fit(x_train, y_train)
 
+        kfold_start = time.perf_counter()
+        if kfold_enabled:
+            _stage("kfold")
+            kfold_raw = self._kfold_validation(
+                model_type=model_type,
+                x=x,
+                y=y,
+                n_components=tuned_params.get("n_components", n_components),
+                model_params=tuned_params,
+                random_state=random_state,
+                n_splits=n_splits,
+            )
+        else:
+            kfold_raw = {"status": "skipped", "reason": "k-fold disabled by user"}
+        kfold_time_sec = round(time.perf_counter() - kfold_start, 6)
+
         if model_type in {"pls", "svr"}:
+            _stage("validation")
             y_true = np.asarray(y_test, dtype=float)
             y_pred = np.asarray(eval_model.predict(x_test), dtype=float)
-            validation_metrics = {
+            holdout_metrics = {
                 "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
                 "mae": float(mean_absolute_error(y_true, y_pred)),
                 "r2": float(r2_score(y_true, y_pred)),
             }
-            kfold = self._kfold_validation(
-                model_type=model_type,
-                x=x,
-                y=y,
-                n_components=n_components,
-                model_params=model_params,
-                random_state=random_state,
-            )
-            permutation = {"status": "skipped", "reason": "Permutation test is enabled only for PLS/PLS-DA in this lightweight module"}
-            if model_type == "pls":
+            kfold = self._format_kfold_regression(kfold_raw, kfold_time_sec)
+            _stage("permutation")
+            permutation_start = time.perf_counter()
+            if model_type == "pls" and permutation_enabled is not False:
                 permutation = self._permutation_test(
                     model_type=model_type,
                     x=x,
                     y=y,
-                    n_components=n_components,
+                    n_components=tuned_params.get("n_components", n_components),
                     random_state=random_state,
+                    n_permutations=n_permutations,
                 )
-            bootstrap_ci = self._bootstrap_ci_regression(y_true=y_true, y_pred=y_pred, random_state=random_state)
+                permutation["enabled"] = True
+            elif model_type == "pls" and permutation_enabled is False:
+                permutation = {"enabled": False, "status": "skipped", "reason": "permutation test disabled by user"}
+            else:
+                permutation = {
+                    "enabled": False,
+                    "status": "skipped",
+                    "reason": "implemented only for PLS-DA and PLS Regression in current version",
+                }
+            permutation["time_sec"] = round(time.perf_counter() - permutation_start, 6)
+            _stage("bootstrap")
+            bootstrap_start = time.perf_counter()
+            if bootstrap_enabled:
+                bootstrap = self._bootstrap_ci_regression(y_true=y_true, y_pred=y_pred, random_state=random_state, n_bootstrap=n_bootstrap)
+            else:
+                bootstrap = {"enabled": False, "status": "skipped", "reason": "bootstrap disabled by user"}
+            bootstrap["time_sec"] = round(time.perf_counter() - bootstrap_start, 6)
             return {
                 "status": "ok",
                 "mode": "holdout_regression",
                 "train_samples": int(len(x_train)),
                 "test_samples": int(len(x_test)),
-                "metrics": validation_metrics,
+                "metrics": holdout_metrics,
+                "holdout_metrics": holdout_metrics,
                 "y_true": y_true.tolist(),
                 "y_pred": y_pred.tolist(),
                 "kfold": kfold,
                 "permutation_test": permutation,
-                "bootstrap_ci": bootstrap_ci,
+                "bootstrap_ci": bootstrap,
+                "bootstrap": bootstrap,
+                "hyperparameter_search": search_report,
                 "limitations": self._build_limitations(
                     model_type=model_type,
                     sample_count=len(x),
                     class_labels=None,
                 ),
                 "warnings": warnings,
-            }
+            }, eval_model, tuned_params, time.perf_counter() - validation_start
 
+        _stage("validation")
         y_true_cls = np.asarray(y_test, dtype=str)
         y_pred_cls = np.asarray(eval_model.predict(x_test), dtype=str)
         labels = sorted(np.unique(np.concatenate([y_true_cls, y_pred_cls])).tolist())
         cm = confusion_matrix(y_true_cls, y_pred_cls, labels=labels)
         cm_total = self._confusion_matrix_total(cm)
         cm_accuracy = self._confusion_matrix_accuracy(cm)
-        validation_metrics = {
+        holdout_metrics = {
             "accuracy": float(accuracy_score(y_true_cls, y_pred_cls)),
             "precision_macro": float(precision_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
             "recall_macro": float(recall_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
             "f1_macro": float(f1_score(y_true_cls, y_pred_cls, average="macro", zero_division=0)),
+        }
+        validation_metrics = {
+            **holdout_metrics,
             "confusion_matrix": cm.tolist(),
             "classes": labels,
             "y_true": y_true_cls.tolist(),
@@ -545,43 +886,95 @@ class AnalysisService:
         }
         if cm_accuracy is not None and abs(validation_metrics["accuracy"] - cm_accuracy) > 1e-6:
             warnings.append("Validation confusion_matrix_accuracy differs from accuracy")
-        kfold = self._kfold_validation(
-            model_type=model_type,
-            x=x,
-            y=y,
-            n_components=n_components,
-            model_params=model_params,
-            random_state=random_state,
-        )
-        permutation = {"status": "skipped", "reason": "Permutation test is enabled only for PLS/PLS-DA in this lightweight module"}
-        if model_type == "plsda":
+        kfold = self._format_kfold_classification(kfold_raw, kfold_time_sec)
+        _stage("permutation")
+        permutation_start = time.perf_counter()
+        if model_type == "plsda" and permutation_enabled is not False:
             permutation = self._permutation_test(
                 model_type=model_type,
                 x=x,
                 y=y,
-                n_components=n_components,
+                n_components=tuned_params.get("n_components", n_components),
                 random_state=random_state,
+                n_permutations=n_permutations,
             )
-        bootstrap_ci = self._bootstrap_ci_classification(y_true=y_true_cls, y_pred=y_pred_cls, random_state=random_state)
+            permutation["enabled"] = True
+        elif model_type == "plsda" and permutation_enabled is False:
+            permutation = {"enabled": False, "status": "skipped", "reason": "permutation test disabled by user"}
+        else:
+            permutation = {
+                "enabled": False,
+                "status": "skipped",
+                "reason": "implemented only for PLS-DA and PLS Regression in current version",
+            }
+        permutation["time_sec"] = round(time.perf_counter() - permutation_start, 6)
+        _stage("bootstrap")
+        bootstrap_start = time.perf_counter()
+        if bootstrap_enabled:
+            bootstrap = self._bootstrap_ci_classification(y_true=y_true_cls, y_pred=y_pred_cls, random_state=random_state, n_bootstrap=n_bootstrap)
+        else:
+            bootstrap = {"enabled": False, "status": "skipped", "reason": "bootstrap disabled by user"}
+        bootstrap["time_sec"] = round(time.perf_counter() - bootstrap_start, 6)
         return {
             "status": "ok",
             "mode": "holdout_classification",
             "train_samples": int(len(x_train)),
             "test_samples": int(len(x_test)),
             "metrics": validation_metrics,
+            "holdout_metrics": holdout_metrics,
             "classes": labels,
             "confusion_matrix": cm.tolist(),
             "y_true": y_true_cls.tolist(),
             "y_pred": y_pred_cls.tolist(),
             "kfold": kfold,
             "permutation_test": permutation,
-            "bootstrap_ci": bootstrap_ci,
+            "bootstrap_ci": bootstrap,
+            "bootstrap": bootstrap,
+            "hyperparameter_search": search_report,
             "limitations": self._build_limitations(
                 model_type=model_type,
                 sample_count=len(x),
                 class_labels=np.asarray(y, dtype=str),
             ),
             "warnings": warnings,
+        }, eval_model, tuned_params, time.perf_counter() - validation_start
+
+    @staticmethod
+    def _format_kfold_classification(kfold_raw: Dict[str, Any], time_sec: float) -> Dict[str, Any]:
+        if kfold_raw.get("status") != "ok":
+            return {"enabled": True, "status": kfold_raw.get("status", "skipped"), "reason": kfold_raw.get("reason"), "time_sec": time_sec}
+        mean_std = kfold_raw.get("mean_std") or {}
+        f1 = mean_std.get("f1_macro") or {}
+        return {
+            "enabled": True,
+            "status": "ok",
+            "n_splits": kfold_raw.get("n_splits"),
+            "metric": "f1_macro",
+            "mean": f1.get("mean"),
+            "std": f1.get("std"),
+            "fold_metrics": kfold_raw.get("fold_metrics"),
+            "mean_std": mean_std,
+            "time_sec": time_sec,
+        }
+
+    @staticmethod
+    def _format_kfold_regression(kfold_raw: Dict[str, Any], time_sec: float) -> Dict[str, Any]:
+        if kfold_raw.get("status") != "ok":
+            return {"enabled": True, "status": kfold_raw.get("status", "skipped"), "reason": kfold_raw.get("reason"), "time_sec": time_sec}
+        mean_std = kfold_raw.get("mean_std") or {}
+        rmse = mean_std.get("rmse") or {}
+        r2 = mean_std.get("r2") or {}
+        return {
+            "enabled": True,
+            "status": "ok",
+            "n_splits": kfold_raw.get("n_splits"),
+            "rmse_mean": rmse.get("mean"),
+            "rmse_std": rmse.get("std"),
+            "r2_mean": r2.get("mean"),
+            "r2_std": r2.get("std"),
+            "fold_metrics": kfold_raw.get("fold_metrics"),
+            "mean_std": mean_std,
+            "time_sec": time_sec,
         }
 
     def _kfold_validation(
@@ -592,22 +985,24 @@ class AnalysisService:
         n_components: Optional[int],
         model_params: Optional[Dict[str, Any]],
         random_state: int,
+        n_splits: int = 5,
     ) -> Dict[str, Any]:
         n_samples = len(x)
         if n_samples < 4:
             return {"status": "skipped", "reason": "Too few samples for k-fold"}
+        requested_splits = max(2, int(n_splits or 5))
 
         metrics_per_fold: List[Dict[str, float]] = []
         if model_type in {"plsda", "svm", "random_forest", "decision_tree"}:
             y_cls = np.asarray(y, dtype=str)
             _, counts = np.unique(y_cls, return_counts=True)
-            n_splits = min(5, int(np.min(counts)))
+            n_splits = min(requested_splits, int(np.min(counts)))
             if n_splits < 2:
                 return {"status": "skipped", "reason": "Not enough samples per class for stratified k-fold"}
             splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=int(random_state))
             split_iter = splitter.split(x, y_cls)
         else:
-            n_splits = min(5, n_samples)
+            n_splits = min(requested_splits, n_samples)
             if n_splits < 2:
                 return {"status": "skipped", "reason": "Not enough samples for k-fold"}
             splitter = KFold(n_splits=n_splits, shuffle=True, random_state=int(random_state))
@@ -723,12 +1118,12 @@ class AnalysisService:
         y_true: np.ndarray,
         y_pred: np.ndarray,
         random_state: int,
-        n_bootstrap: int = 500,
+        n_bootstrap: int = 1000,
     ) -> Dict[str, Any]:
         rng = np.random.default_rng(int(random_state))
         n = len(y_true)
         if n < 3:
-            return {"status": "skipped", "reason": "Too few samples for bootstrap CI"}
+            return {"enabled": True, "status": "skipped", "reason": "Too few samples for bootstrap CI"}
 
         acc_scores: List[float] = []
         f1_scores: List[float] = []
@@ -739,11 +1134,16 @@ class AnalysisService:
             acc_scores.append(float(accuracy_score(y_t, y_p)))
             f1_scores.append(float(f1_score(y_t, y_p, average="macro", zero_division=0)))
 
+        f1_ci = [float(np.percentile(f1_scores, 2.5)), float(np.percentile(f1_scores, 97.5))]
         return {
+            "enabled": True,
             "status": "ok",
             "n_bootstrap": n_bootstrap,
+            "n_iterations": n_bootstrap,
+            "metric": "f1_macro",
+            "ci_95": f1_ci,
             "accuracy_95ci": [float(np.percentile(acc_scores, 2.5)), float(np.percentile(acc_scores, 97.5))],
-            "f1_macro_95ci": [float(np.percentile(f1_scores, 2.5)), float(np.percentile(f1_scores, 97.5))],
+            "f1_macro_95ci": f1_ci,
         }
 
     def _bootstrap_ci_regression(
@@ -751,12 +1151,12 @@ class AnalysisService:
         y_true: np.ndarray,
         y_pred: np.ndarray,
         random_state: int,
-        n_bootstrap: int = 500,
+        n_bootstrap: int = 1000,
     ) -> Dict[str, Any]:
         rng = np.random.default_rng(int(random_state))
         n = len(y_true)
         if n < 3:
-            return {"status": "skipped", "reason": "Too few samples for bootstrap CI"}
+            return {"enabled": True, "status": "skipped", "reason": "Too few samples for bootstrap CI"}
 
         rmse_scores: List[float] = []
         r2_scores: List[float] = []
@@ -769,10 +1169,15 @@ class AnalysisService:
             mae_scores.append(float(mean_absolute_error(y_t, y_p)))
             r2_scores.append(float(r2_score(y_t, y_p)))
 
+        rmse_ci = [float(np.percentile(rmse_scores, 2.5)), float(np.percentile(rmse_scores, 97.5))]
         return {
+            "enabled": True,
             "status": "ok",
             "n_bootstrap": n_bootstrap,
-            "rmse_95ci": [float(np.percentile(rmse_scores, 2.5)), float(np.percentile(rmse_scores, 97.5))],
+            "n_iterations": n_bootstrap,
+            "metric": "rmse",
+            "ci_95": rmse_ci,
+            "rmse_95ci": rmse_ci,
             "mae_95ci": [float(np.percentile(mae_scores, 2.5)), float(np.percentile(mae_scores, 97.5))],
             "r2_95ci": [float(np.percentile(r2_scores, 2.5)), float(np.percentile(r2_scores, 97.5))],
         }
@@ -982,6 +1387,11 @@ class AnalysisService:
 
     def infer(self, model_type: str, model_id: str, dataset: SpectrumDataset) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
+        if self._normalize_model_type(metadata.get("model_type", model_type)) == "hca":
+            raise ValueError(
+                "This saved HCA result cannot be used for direct prediction on new spectra. "
+                "Re-run clustering on the full dataset."
+            )
         prepared, report, warnings = self._prepare_inference_dataset(dataset, metadata)
         expected_features = self._expected_feature_count(metadata)
         if expected_features and prepared.feature_count != expected_features:
@@ -989,9 +1399,12 @@ class AnalysisService:
                 f"Количество признаков во входном файле ({dataset.feature_count}) не совпадает "
                 f"с обученной моделью ({expected_features})."
             )
+        predict_start = time.perf_counter()
         result = model.inference_result(prepared.x)
+        predict_time_sec = time.perf_counter() - predict_start
         plot = self._build_plot(metadata.get("model_type", model_type), result, phase="inference")
         predictions = self._prediction_rows(result, prepared.sample_names)
+        sample_count = max(1, prepared.sample_count)
         return {
             "status": "success",
             "model_id": metadata.get("model_id", model_id),
@@ -1003,6 +1416,7 @@ class AnalysisService:
             "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
             "warnings": warnings,
+            "performance": {"predict_time_one_sample_ms": round((predict_time_sec / sample_count) * 1000.0, 4), "predict_time_total_sec": round(predict_time_sec, 6)},
         }
 
     def infer_many(
@@ -1012,12 +1426,19 @@ class AnalysisService:
         datasets: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         model, metadata = self.model_manager.load(model_type=model_type, model_id=model_id)
+        if self._normalize_model_type(metadata.get("model_type", model_type)) == "hca":
+            raise ValueError(
+                "This saved HCA result cannot be used for direct prediction on new spectra. "
+                "Re-run clustering on the full dataset."
+            )
         expected_features = self._expected_feature_count(metadata)
         all_results: List[Dict[str, Any]] = []
         all_predicted_classes: List[str] = []
         all_predictions: List[float] = []
         reports: List[Dict[str, Any]] = []
         warnings: List[str] = []
+        total_samples = 0
+        predict_time_sec = 0.0
 
         for item in datasets:
             filename = item["filename"]
@@ -1031,7 +1452,10 @@ class AnalysisService:
                     f"Файл {filename}: число признаков ({dataset.feature_count}) не совпадает "
                     f"с обученной моделью ({expected_features})."
                 )
+            predict_start = time.perf_counter()
             result = model.inference_result(prepared.x)
+            predict_time_sec += time.perf_counter() - predict_start
+            total_samples += max(1, prepared.sample_count)
             row = {"filename": filename, "result": result, "inference_report": report}
             all_results.append(row)
 
@@ -1073,6 +1497,10 @@ class AnalysisService:
             "plots": {"prediction_distribution": plot} if plot else {},
             "plot": plot,
             "warnings": warnings,
+            "performance": {
+                "predict_time_one_sample_ms": round((predict_time_sec / max(1, total_samples)) * 1000.0, 4),
+                "predict_time_total_sec": round(predict_time_sec, 6),
+            },
         }
 
     @staticmethod
@@ -1302,12 +1730,6 @@ class AnalysisService:
             if not labels:
                 return {}
             return class_count_plot([str(v) for v in labels], f"{normalized}: распределение кластеров")
-
-        if normalized == "mcr_als":
-            residuals = result.get("mean_absolute_residual")
-            if residuals:
-                return residual_plot([float(v) for v in residuals], "MCR-ALS stub: residuals")
-            return {}
 
         return {}
 

@@ -10,6 +10,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+STAGE_LABELS: Dict[str, str] = {
+    "preparing_data": "Подготовка данных",
+    "train_test_split": "Разделение train/test",
+    "grid_search": "Подбор гиперпараметров (GridSearchCV)",
+    "fit": "Обучение модели",
+    "validation": "Валидация (holdout)",
+    "kfold": "k-fold проверка",
+    "bootstrap": "Bootstrap-интервалы",
+    "permutation": "Permutation test",
+    "saving": "Сохранение результатов",
+    "done": "Готово",
+    "error": "Ошибка",
+    "interrupted": "Прервано",
+}
+
+# If a run's status hasn't been updated for this long and it never reached a
+# terminal state, the server most likely restarted/crashed mid-computation -
+# report it as interrupted rather than "running" forever.
+STALE_AFTER_SECONDS = 90.0
+
+
 class AnalysisRunManager:
     def __init__(self, root_dir: Path):
         self.root_dir = Path(root_dir)
@@ -48,6 +69,16 @@ class AnalysisRunManager:
         "preprocessing_config",
         "preprocessing_preset",
         "spectrometer_parameters",
+        "best_params",
+        "hyperparameter_search_enabled",
+        "training_time_seconds",
+        "fit_time_sec",
+        "validation_time_sec",
+        "kfold_time_sec",
+        "bootstrap_time_sec",
+        "permutation_time_sec",
+        "predict_time_one_sample_ms",
+        "peak_memory_mb",
         "warnings",
     ]
 
@@ -111,6 +142,9 @@ class AnalysisRunManager:
         if method_row is None:
             metrics = (run.get("results") or {}).get("metrics") or {}
             saved_model = (run.get("results") or {}).get("saved_model") or {}
+            performance = (run.get("results") or {}).get("performance") or {}
+            best_params = (run.get("results") or {}).get("best_params") or saved_model.get("best_params")
+            hp_search = (run.get("results") or {}).get("hyperparameter_search") or {}
             row["method"] = base.get("best_method") or saved_model.get("model_type") or base.get("method") or ""
             row["model_type"] = saved_model.get("model_type") or base.get("best_method") or base.get("method") or ""
             row["model_id"] = saved_model.get("model_id") or ""
@@ -118,6 +152,9 @@ class AnalysisRunManager:
             row["warnings"] = self._normalize_row_warnings(base.get("warnings"))
         else:
             metrics = method_row.get("metrics") if isinstance(method_row.get("metrics"), dict) else {}
+            performance = method_row.get("performance") or {}
+            best_params = method_row.get("best_params")
+            hp_search = method_row.get("hyperparameter_search") or {}
             row["method"] = method_row.get("method") or method_row.get("model_type") or ""
             row["model_type"] = method_row.get("model_type") or method_row.get("method") or ""
             row["model_id"] = method_row.get("model_id") or ""
@@ -130,6 +167,17 @@ class AnalysisRunManager:
             row["method"] = ""
         if row["model_type"] is None:
             row["model_type"] = ""
+
+        row["best_params"] = self._json_safe(best_params) if best_params else None
+        row["hyperparameter_search_enabled"] = bool(hp_search.get("enabled")) if isinstance(hp_search, dict) else False
+        row["training_time_seconds"] = performance.get("total_time_sec")
+        row["fit_time_sec"] = performance.get("fit_time_sec")
+        row["validation_time_sec"] = performance.get("validation_time_sec")
+        row["kfold_time_sec"] = performance.get("kfold_time_sec")
+        row["bootstrap_time_sec"] = performance.get("bootstrap_time_sec")
+        row["permutation_time_sec"] = performance.get("permutation_time_sec")
+        row["predict_time_one_sample_ms"] = performance.get("predict_time_one_sample_ms")
+        row["peak_memory_mb"] = performance.get("peak_memory_mb")
 
         row["accuracy"] = metrics.get("accuracy")
         row["precision_macro"] = metrics.get("precision_macro")
@@ -209,6 +257,11 @@ class AnalysisRunManager:
         run = self.get(run_id)
         return self._csv_bytes_for_run(run)
 
+    def csv_rows(self, run_id: str) -> List[Dict[str, Any]]:
+        """Public accessor for the same flat rows used by csv_bytes(), for callers (e.g. the xlsx
+        export route) that need them as Python dicts instead of a CSV byte string."""
+        return self._csv_rows_for_run(self.get(run_id))
+
     def new_run_id(self, prefix: str = "run") -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         base = f"{prefix}_{stamp}"
@@ -221,6 +274,79 @@ class AnalysisRunManager:
 
     def _run_dir(self, run_id: str) -> Path:
         return self.root_dir / self._safe_id(run_id)
+
+    def _status_path(self, run_id: str) -> Path:
+        return self._run_dir(run_id) / "status.json"
+
+    def start_run(self, run_id: str, run_type: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Creates the run directory and writes the initial status.json, BEFORE any heavy
+        computation starts. This file is separate from run_metadata.json (written only once,
+        at the very end, by save()) so an interrupted background job can never corrupt or
+        touch the final artifacts of this or any other run."""
+        run_id = self._safe_id(run_id)
+        run_dir = self._run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat()
+        payload: Dict[str, Any] = {
+            "run_id": run_id,
+            "run_type": run_type,
+            "status": "running",
+            "stage": "preparing_data",
+            "stage_label": STAGE_LABELS["preparing_data"],
+            "progress": {},
+            "error": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if extra:
+            payload.update(extra)
+        self._status_path(run_id).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+
+    def update_run_status(self, run_id: str, **kwargs: Any) -> Dict[str, Any]:
+        run_id = self._safe_id(run_id)
+        path = self._status_path(run_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"run_id": run_id}
+        except json.JSONDecodeError:
+            payload = {"run_id": run_id}
+        stage = kwargs.get("stage")
+        if stage is not None and "stage_label" not in kwargs:
+            kwargs["stage_label"] = STAGE_LABELS.get(stage, stage)
+        payload.update(kwargs)
+        payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._run_dir(run_id).mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
+
+    def get_run_status(self, run_id: str) -> Dict[str, Any]:
+        run_id = self._safe_id(run_id)
+        path = self._status_path(run_id)
+        meta_exists = (self._run_dir(run_id) / "run_metadata.json").exists()
+        if not path.exists():
+            if meta_exists:
+                return {"run_id": run_id, "status": "success", "stage": "done", "stage_label": STAGE_LABELS["done"], "error": None}
+            raise FileNotFoundError("Эксперимент не найден")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") == "running":
+            if meta_exists:
+                # save() finished but the in-progress status update raced behind it - treat as success.
+                payload["status"] = "success"
+                payload["stage"] = "done"
+                payload["stage_label"] = STAGE_LABELS["done"]
+            else:
+                try:
+                    updated_at = datetime.fromisoformat(payload.get("updated_at"))
+                except (TypeError, ValueError):
+                    updated_at = None
+                if updated_at is not None:
+                    age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                    if age > STALE_AFTER_SECONDS:
+                        payload["status"] = "error"
+                        payload["stage"] = "interrupted"
+                        payload["stage_label"] = STAGE_LABELS["interrupted"]
+                        payload["error"] = "Расчёт прерван: сервер был перезапущен или процесс остановлен во время вычислений."
+        return payload
 
     def save(self, run: Dict[str, Any]) -> Dict[str, Any]:
         run_id = self._safe_id(str(run.get("run_id") or self.new_run_id()))
@@ -249,6 +375,33 @@ class AnalysisRunManager:
         self._write_comparison_csv(run_dir / "comparison_table.csv", payload)
         return payload
 
+    @staticmethod
+    def _list_method_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        results = payload.get("results") or {}
+        rows = results.get("method_results") or results.get("comparison") or []
+        if rows:
+            return rows
+        return [{"method": payload.get("best_method"), "metrics": results.get("metrics") or {}, "validation": results.get("validation") or {}, "hyperparameter_search": results.get("hyperparameter_search") or {}}]
+
+    @classmethod
+    def _list_summary_extra(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Old run_metadata.json files predate this method and simply won't have these keys -
+        callers (the history table) must treat their absence as 'нет данных', not an error."""
+        rows = cls._list_method_rows(payload)
+        validation_ok = any((row.get("validation") or {}).get("status") == "ok" for row in rows)
+        any_validation_attempted = any((row.get("validation") or {}) for row in rows)
+        hp_enabled = any((row.get("hyperparameter_search") or {}).get("enabled") for row in rows)
+        best_method = payload.get("best_method")
+        best_row = next((row for row in rows if row.get("method") == best_method or row.get("model_type") == best_method), rows[0] if rows else {})
+        metrics = best_row.get("metrics") or {}
+        primary_metric_name = next((key for key in ("f1_macro", "accuracy", "r2", "rmse", "silhouette_score") if metrics.get(key) is not None), None)
+        return {
+            "validation_status": "ok" if validation_ok else ("skipped" if any_validation_attempted else None),
+            "hyperparameter_search_enabled": hp_enabled,
+            "primary_metric_name": primary_metric_name,
+            "primary_metric_value": metrics.get(primary_metric_name) if primary_metric_name else None,
+        }
+
     def list(self) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         for meta_path in self.root_dir.glob("*/run_metadata.json"):
@@ -269,6 +422,7 @@ class AnalysisRunManager:
                     "best_method": payload.get("best_method"),
                     "status": payload.get("status"),
                     "summary": payload.get("summary"),
+                    **self._list_summary_extra(payload),
                 }
             )
         items.sort(key=lambda item: item.get("created_at") or "", reverse=True)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import io
+import time
 import zipfile
 import csv
 import pickle
@@ -14,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -404,6 +406,8 @@ class ModelTrainRequest(BaseModel):
     model_params: Dict[str, Any] = Field(default_factory=dict)
     validation: Dict[str, Any] = Field(default_factory=dict)
     target_column: Optional[str] = None
+    hyperparameter_search: bool = False
+    refit_on_full_data: bool = True
 
 
 class SaveDatasetRequest(BaseModel):
@@ -496,7 +500,9 @@ async def dataset_import(
         user = current_analysis_user(request)
         memory_files = await upload_files_to_memory(files)
         config = _read_config(import_config)
+        import_start = time.perf_counter()
         dataset = import_dataset(memory_files, config)
+        dataset.metadata["import_time_sec"] = round(time.perf_counter() - import_start, 6)
         _attach_owner(dataset, user)
         dataset.metadata["dataset_name"] = _dataset_short_name(dataset, "raw")
         validation = validate_dataset(dataset)
@@ -903,7 +909,9 @@ async def dataset_preprocess_apply(request: Request, dataset_id: str, preprocess
     try:
         user = current_analysis_user(request)
         dataset = get_owned_dataset(dataset_id, user)
+        preprocess_start = time.perf_counter()
         result = apply_preprocessing(dataset, preprocessing_config)
+        dataset.metadata["preprocessing_time_sec"] = round(time.perf_counter() - preprocess_start, 6)
         dataset.metadata["dataset_name"] = _dataset_short_name(dataset, "processed")
         persist_user_dataset(dataset, user)
         manager = user_run_manager(user)
@@ -971,6 +979,8 @@ async def train_model_from_dataset(
     test_size: float = Form(0.3),
     random_state: int = Form(42),
     use_processed: bool = Form(False),
+    hyperparameter_search: bool = Form(False),
+    refit_on_full_data: bool = Form(True),
 ):
     try:
         user = current_analysis_user(request)
@@ -986,6 +996,8 @@ async def train_model_from_dataset(
             do_validation=do_validation,
             test_size=test_size,
             random_state=random_state,
+            hyperparameter_search=hyperparameter_search,
+            refit_on_full_data=refit_on_full_data,
             metadata_extra={
                 "dataset_id": dataset_id,
                 "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
@@ -1025,6 +1037,150 @@ async def train_model_from_dataset(
         raise HTTPException(status_code=500, detail="Внутренняя ошибка обучения по импортированному датасету") from exc
 
 
+def _validation_kwargs(
+    validation: Dict[str, Any],
+    hyperparameter_search_default: bool,
+    do_validation_default: bool = True,
+    refit_on_full_data_default: bool = True,
+    quick_mode_default: bool = True,
+) -> Dict[str, Any]:
+    """Extracts do_validation/hyperparameter_search/kfold/bootstrap/permutation/n_*/quick_mode
+    overrides from the request's `validation` dict, falling back to the given per-call defaults
+    (e.g. ВКР-mode defaults for comparison runs) for anything the caller didn't explicitly specify.
+    permutation_test is left as None (auto: plsda/pls only) unless the caller explicitly passes
+    true/false.
+
+    quick_mode is the new DEFAULT (True): n_bootstrap=100, n_permutations=50, and a reduced
+    GridSearchCV grid for random_forest/svm/svr (see hyperparameter_search.py). The frontend's
+    "Подробный расчёт" checkbox sends validation.quick_mode=false to switch to the full ВКР
+    settings (n_bootstrap=1000, n_permutations=200, full grid) - explicit n_bootstrap/n_permutations
+    in the request always win over either default."""
+    permutation_raw = validation.get("permutation_test")
+    quick_mode = bool(validation.get("quick_mode", quick_mode_default))
+    default_n_bootstrap = 100 if quick_mode else 1000
+    default_n_permutations = 50 if quick_mode else 200
+    return {
+        "do_validation": bool(validation.get("enabled", do_validation_default)),
+        "test_size": float(validation.get("test_size", 0.3)),
+        "random_state": int(validation.get("random_state", 42)),
+        "hyperparameter_search": bool(validation.get("hyperparameter_search", hyperparameter_search_default)),
+        "refit_on_full_data": bool(validation.get("refit_on_full_data", refit_on_full_data_default)),
+        "kfold_enabled": bool(validation.get("kfold", True)),
+        "bootstrap_enabled": bool(validation.get("bootstrap", True)),
+        "permutation_enabled": bool(permutation_raw) if permutation_raw is not None else None,
+        "n_splits": int(validation.get("n_splits", 5)),
+        "n_bootstrap": int(validation.get("n_bootstrap", default_n_bootstrap)),
+        "n_permutations": int(validation.get("n_permutations", default_n_permutations)),
+        "quick_mode": quick_mode,
+    }
+
+
+_background_tasks: set = set()
+
+
+def _launch_background(coro) -> None:
+    """Fire-and-forget a coroutine on the running event loop, keeping a reference so it isn't
+    garbage-collected mid-flight. The route that creates the task has already returned a run_id
+    to the client by the time this runs; any exception is caught inside the coroutine itself and
+    recorded via AnalysisRunManager.update_run_status (status=error) - it must never escape here."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _run_single_training_background(payload: ModelTrainRequest, imported: Any, user: Dict[str, Any], run_id: str) -> None:
+    manager = user_run_manager(user)
+
+    def on_stage(stage: str) -> None:
+        manager.update_run_status(run_id, stage=stage)
+
+    try:
+        await asyncio.to_thread(_train_single_sync, payload, imported, user, run_id, manager, on_stage)
+        manager.update_run_status(run_id, status="success", stage="done")
+    except Exception as exc:
+        logger.exception("Background single-model training failed: %s", run_id)
+        manager.update_run_status(run_id, status="error", stage="error", error=str(exc))
+
+
+def _train_single_sync(
+    payload: ModelTrainRequest,
+    imported: Any,
+    user: Dict[str, Any],
+    run_id: str,
+    manager: AnalysisRunManager,
+    on_stage,
+) -> None:
+    validation = payload.validation or {}
+    version = "processed" if payload.use_processed else "raw"
+    summary = imported.summary(version=version)
+    trained = user_analysis_service(user).train_and_save(
+        model_type=payload.model_type,
+        dataset=imported.to_analysis_dataset(version=version),
+        raw_targets="\n".join(imported.y) if imported.y else None,
+        n_components=payload.n_components,
+        model_name=payload.model_name,
+        model_params=payload.model_params,
+        on_stage=on_stage,
+        **_validation_kwargs(validation, hyperparameter_search_default=payload.hyperparameter_search, refit_on_full_data_default=payload.refit_on_full_data),
+        metadata_extra={
+            "dataset_id": imported.metadata.get("saved_dataset_id") or payload.dataset_id,
+            "runtime_dataset_id": payload.dataset_id,
+            "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
+            "source_dataset_name": ";".join(imported.source_files[:3]),
+            "dataset_version": version,
+            "used_processed_data": version == "processed",
+            "target_name": imported.target_name,
+            "target_type": summary.get("target_type"),
+            "class_distribution": summary.get("class_distribution"),
+            "axis_range": [summary.get("axis_min"), summary.get("axis_max")],
+            "axis_min": summary.get("axis_min"),
+            "axis_max": summary.get("axis_max"),
+            "raw_spectral_axis": imported.axis.astype(float).tolist(),
+            "n_samples": summary.get("n_samples"),
+            "n_features": summary.get("n_features"),
+            "import_config": imported.import_config(),
+            "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
+            "preprocessing_summary": summary.get("preprocessing") or {},
+            "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
+            "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
+            "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
+            "slit_width_um_values": imported.metadata.get("slit_width_um_values") or [],
+            "grating_lines_mm_values": imported.metadata.get("grating_lines_mm_values") or [],
+            "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
+            "accumulations_values": imported.metadata.get("accumulations_values") or [],
+            "power_mw_values": imported.metadata.get("power_mw_values") or [],
+            "preprocessing": imported.preprocessing_config if version == "processed" else {},
+            "run_id": run_id,
+            "user_id": user["user_id"],
+            "username": user["username"],
+        },
+    )
+    _save_single_model_run(
+        manager=manager,
+        run_id=run_id,
+        payload=payload,
+        imported=imported,
+        summary=summary,
+        version=version,
+        trained=trained,
+    )
+
+
+async def _run_comparison_background(payload: ModelTrainRequest, imported: Any, normalized_type: str, user: Dict[str, Any], run_id: str) -> None:
+    manager = user_run_manager(user)
+
+    def on_stage(stage: str, **extra: Any) -> None:
+        progress = {key: extra[key] for key in ("method", "method_index", "methods_total") if key in extra}
+        manager.update_run_status(run_id, stage=stage, progress=progress)
+
+    try:
+        await asyncio.to_thread(_train_comparison, payload, imported, normalized_type, user, run_id, on_stage)
+        manager.update_run_status(run_id, status="success", stage="done")
+    except Exception as exc:
+        logger.exception("Background comparison training failed: %s", run_id)
+        manager.update_run_status(run_id, status="error", stage="error", error=str(exc))
+
+
 @router.post("/model/train")
 async def train_model_json(request: Request, payload: ModelTrainRequest):
     try:
@@ -1033,70 +1189,20 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
         if payload.use_processed and imported.processed_X is None:
             raise ValueError("Предобработанная версия датасета ещё не создана.")
         normalized_type = payload.model_type.lower().replace("-", "_")
+        manager = user_run_manager(user)
         if normalized_type in {"compare_classification", "compare_regression", "compare_clustering"}:
-            return _train_comparison(payload, imported, normalized_type, user)
+            run_id = manager.new_run_id("comparison")
+            manager.start_run(run_id, "comparison", extra={"dataset_id": payload.dataset_id, "model_type": normalized_type})
+            _launch_background(_run_comparison_background(payload, imported, normalized_type, user, run_id))
+            return {"status": "running", "run_id": run_id, "run_type": "comparison", "model_type": normalized_type}
         supervised_types = {"pls", "pls_regression", "plsda", "pls_da", "svm", "random_forest", "decision_tree", "svr"}
         if normalized_type in supervised_types and not imported.y:
             raise ValueError("Для выбранного supervised-метода нужен target. Выберите target-колонку при импорте датасета.")
 
-        validation = payload.validation or {}
-        version = "processed" if payload.use_processed else "raw"
-        summary = imported.summary(version=version)
-        manager = user_run_manager(user)
         run_id = manager.new_run_id("single_model")
-        trained = user_analysis_service(user).train_and_save(
-            model_type=payload.model_type,
-            dataset=imported.to_analysis_dataset(version=version),
-            raw_targets="\n".join(imported.y) if imported.y else None,
-            n_components=payload.n_components,
-            model_name=payload.model_name,
-            do_validation=bool(validation.get("enabled", True)),
-            test_size=float(validation.get("test_size", 0.3)),
-            random_state=int(validation.get("random_state", 42)),
-            model_params=payload.model_params,
-            metadata_extra={
-                "dataset_id": imported.metadata.get("saved_dataset_id") or payload.dataset_id,
-                "runtime_dataset_id": payload.dataset_id,
-                "dataset_name": imported.metadata.get("dataset_name") or _dataset_short_name(imported, version),
-                "source_dataset_name": ";".join(imported.source_files[:3]),
-                "dataset_version": version,
-                "used_processed_data": version == "processed",
-                "target_name": imported.target_name,
-                "target_type": summary.get("target_type"),
-                "class_distribution": summary.get("class_distribution"),
-                "axis_range": [summary.get("axis_min"), summary.get("axis_max")],
-                "axis_min": summary.get("axis_min"),
-                "axis_max": summary.get("axis_max"),
-                "raw_spectral_axis": imported.axis.astype(float).tolist(),
-                "n_samples": summary.get("n_samples"),
-                "n_features": summary.get("n_features"),
-                "import_config": imported.import_config(),
-                "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
-                "preprocessing_summary": summary.get("preprocessing") or {},
-                "measurement_metadata": imported.metadata.get("measurement_metadata") or {},
-                "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
-                "sample_metadata_preview": imported.metadata.get("sample_metadata_preview") or [],
-                "slit_width_um_values": imported.metadata.get("slit_width_um_values") or [],
-                "grating_lines_mm_values": imported.metadata.get("grating_lines_mm_values") or [],
-                "exposure_time_s_values": imported.metadata.get("exposure_time_s_values") or [],
-                "accumulations_values": imported.metadata.get("accumulations_values") or [],
-                "power_mw_values": imported.metadata.get("power_mw_values") or [],
-                "preprocessing": imported.preprocessing_config if version == "processed" else {},
-                "run_id": run_id,
-                "user_id": user["user_id"],
-                "username": user["username"],
-            },
-        )
-        run = _save_single_model_run(
-            manager=manager,
-            run_id=run_id,
-            payload=payload,
-            imported=imported,
-            summary=summary,
-            version=version,
-            trained=trained,
-        )
-        return {"status": "ok", "dataset_id": payload.dataset_id, "dataset_version": version, "run": run, "run_id": run_id, **trained}
+        manager.start_run(run_id, "single_model", extra={"dataset_id": payload.dataset_id, "model_type": payload.model_type})
+        _launch_background(_run_single_training_background(payload, imported, user, run_id))
+        return {"status": "running", "run_id": run_id, "run_type": "single_model", "model_type": payload.model_type}
     except HTTPException:
         raise
     except (SpectrumValidationError, ValueError) as exc:
@@ -1106,7 +1212,20 @@ async def train_model_json(request: Request, payload: ModelTrainRequest):
         raise HTTPException(status_code=500, detail="Внутренняя ошибка обучения модели") from exc
 
 
-def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type: str, user: Dict[str, Any]) -> Dict[str, Any]:
+@router.post("/train/compare")
+async def train_model_compare(request: Request, payload: ModelTrainRequest):
+    """Explicit comparison-mode entry point (same body shape as /model/train); model_type must be
+    one of compare_classification/compare_regression/compare_clustering. Kept alongside
+    /model/train (which also dispatches to the same background comparison job for compare_*
+    model_type) so the frontend's 'Сравнить методы' action has a self-describing route to call."""
+    normalized_type = payload.model_type.lower().replace("-", "_")
+    if normalized_type not in {"compare_classification", "compare_regression", "compare_clustering"}:
+        raise HTTPException(status_code=400, detail="/train/compare ожидает model_type из compare_classification/compare_regression/compare_clustering")
+    return await train_model_json(request, payload)
+
+
+def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type: str, user: Dict[str, Any], run_id: str, on_stage=None) -> Dict[str, Any]:
+    comparison_start = time.perf_counter()
     version = "processed" if payload.use_processed else "raw"
     summary = imported.summary(version=version)
     raw_targets = "\n".join(imported.y) if imported.y else None
@@ -1123,13 +1242,21 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
         "compare_clustering": ["kmeans", "hca"],
     }[normalized_type]
     validation = payload.validation or {}
+    # ВКР mode: for supervised comparisons, an honest holdout split and GridSearchCV are ON by
+    # default (the user must explicitly pass validation.enabled=false / hyperparameter_search=false
+    # to opt out). Clustering has no supervised holdout/search, so it keeps its prior defaults.
+    is_supervised_comparison = normalized_type in {"compare_classification", "compare_regression"}
+    do_validation_default = is_supervised_comparison
+    hyperparameter_search_default = is_supervised_comparison
     manager = user_run_manager(user)
     service = user_analysis_service(user)
-    run_id = manager.new_run_id("comparison")
     rows: List[Dict[str, Any]] = []
     saved_models: List[Dict[str, Any]] = []
     errors: List[Dict[str, str]] = []
-    for method in methods:
+    for method_index, method in enumerate(methods):
+        def method_stage(stage: str, _method: str = method, _index: int = method_index) -> None:
+            if on_stage is not None:
+                on_stage(stage, method=_method, method_index=_index + 1, methods_total=len(methods))
         try:
             trained = service.train_and_save(
                 model_type=method,
@@ -1137,10 +1264,15 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
                 raw_targets=raw_targets,
                 n_components=payload.n_components,
                 model_name=f"{payload.model_name or 'comparison'}_{method}",
-                do_validation=bool(validation.get("enabled", normalized_type != "compare_clustering")),
-                test_size=float(validation.get("test_size", 0.3)),
-                random_state=int(validation.get("random_state", 42)),
                 model_params=payload.model_params,
+                on_stage=method_stage,
+                **_validation_kwargs(
+                    validation,
+                    hyperparameter_search_default=hyperparameter_search_default,
+                    do_validation_default=do_validation_default,
+                    refit_on_full_data_default=payload.refit_on_full_data,
+                ),
+                model_id_override=f"{run_id}_{method}",
                 metadata_extra={
                     "dataset_id": imported.metadata.get("saved_dataset_id") or payload.dataset_id,
                     "runtime_dataset_id": payload.dataset_id,
@@ -1174,14 +1306,27 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             )
             metrics = trained.get("metrics") or {}
             saved_model = trained.get("saved_model") or {}
+            full_dataset_outputs = trained.get("full_dataset_outputs") or {}
             row = {
                 "method": method,
                 "status": "success",
                 "model_id": saved_model.get("model_id"),
                 "model_type": saved_model.get("model_type"),
                 "metrics": metrics,
-                "confusion_matrix": metrics.get("confusion_matrix") or trained.get("result", {}).get("confusion_matrix"),
+                # metrics.confusion_matrix is the TEST (holdout) confusion matrix when validation
+                # succeeded, or null when it didn't run - it must NEVER silently fall back to the
+                # full-dataset matrix (that one lives separately in full_dataset_confusion_matrix).
+                "confusion_matrix": metrics.get("confusion_matrix"),
+                "full_dataset_confusion_matrix": full_dataset_outputs.get("confusion_matrix"),
                 "params": saved_model.get("model_params") or saved_model.get("params") or {},
+                "best_params": trained.get("best_params"),
+                "hyperparameter_search": trained.get("hyperparameter_search") or {},
+                "performance": trained.get("performance") or {},
+                "training_policy": trained.get("training_policy") or {},
+                "validation": trained.get("validation") or {},
+                "outputs": trained.get("outputs") or {},
+                "test_outputs": trained.get("test_outputs") or {},
+                "full_dataset_outputs": full_dataset_outputs,
                 "warnings": trained.get("warnings") or [],
                 "plot": trained.get("plot") or {},
                 **metrics,
@@ -1193,13 +1338,39 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             errors.append({"method": method, "error": str(exc)})
     if not rows:
         raise ValueError("Не удалось выполнить ни один метод сравнения.")
-    best_method = _best_method(normalized_type, rows)
+    model_ids = [row.get("model_id") for row in rows if row.get("model_id")]
+    if len(model_ids) != len(set(model_ids)):
+        logger.error("Duplicate model_id detected within comparison run %s: %s", run_id, model_ids)
+    best_method_selection = _select_best_method(normalized_type, rows)
+    best_method = best_method_selection.get("selected_method")
     comparison_plots = [
         {"plot_id": f"{row.get('method')}_plot", "title": row.get("method"), **row.get("plot")}
         for row in rows
         if row.get("plot")
     ]
     run_status = "warning" if errors else "success"
+    comparison_time_sec = time.perf_counter() - comparison_start
+    per_method_peak_memory = [row.get("performance", {}).get("peak_memory_mb") for row in rows if isinstance(row.get("performance", {}).get("peak_memory_mb"), (int, float))]
+    pipeline_performance = {
+        "import_time_sec": imported.metadata.get("import_time_sec"),
+        "import_time_source": "measured_at_import" if imported.metadata.get("import_time_sec") is not None else "not_measured_in_current_run",
+        "preprocessing_time_sec": imported.metadata.get("preprocessing_time_sec"),
+        "preprocessing_time_source": "measured_at_preprocessing" if imported.metadata.get("preprocessing_time_sec") is not None else "not_measured_in_current_run",
+        "comparison_time_sec": round(comparison_time_sec, 6),
+        "export_time_sec": None,
+        "export_time_source": "not_measured_in_current_run",
+        "peak_memory_mb": max(per_method_peak_memory) if per_method_peak_memory else None,
+        "peak_memory_source": "max(per_method performance.peak_memory_mb)" if per_method_peak_memory else "not_measured_in_current_run",
+    }
+    comparison_performance = {
+        "total_time_sec": round(comparison_time_sec, 6),
+        "peak_memory_mb": max(per_method_peak_memory) if per_method_peak_memory else None,
+        "peak_memory_source": "max(per_method performance.peak_memory_mb)" if per_method_peak_memory else "not_measured_in_current_run",
+        "methods_count": len(methods),
+        "successful_methods": len(rows),
+        "failed_methods": len(errors),
+    }
+    vkr_tables = _build_vkr_tables(rows, dataset_name=imported.metadata.get("dataset_name") or _dataset_short_name(imported, version), n_samples=summary.get("n_samples"), n_features=summary.get("n_features"))
     run = manager.save(
         {
             "run_id": run_id,
@@ -1210,8 +1381,11 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             "target_name": imported.target_name,
             "target_type": summary.get("target_type"),
             "class_distribution": summary.get("class_distribution"),
+            "n_samples": summary.get("n_samples"),
+            "n_features": summary.get("n_features"),
             "methods": methods,
             "best_method": best_method,
+            "best_method_selection": best_method_selection,
             "status": run_status,
             "summary": f"Сравнение методов завершено. Лучший метод: {best_method or 'н/д'}.",
             "results": {"method_results": rows, "errors": errors},
@@ -1220,6 +1394,9 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
             "import_config": imported.import_config(),
             "preprocessing_config": imported.preprocessing_config if version == "processed" else {},
             "spectrometer_parameters": imported.metadata.get("measurement_metadata") or {},
+            "pipeline_performance": pipeline_performance,
+            "comparison_performance": comparison_performance,
+            "vkr_tables": vkr_tables,
             "user_id": user["user_id"],
             "username": user["username"],
         }
@@ -1235,32 +1412,129 @@ def _train_comparison(payload: ModelTrainRequest, imported: Any, normalized_type
         "dataset_version": version,
         "summary": summary,
         "best_method": best_method,
+        "best_method_selection": best_method_selection,
         "comparison_table": rows,
         "metrics": {"comparison": rows},
         "result": {"comparison": rows, "method_results": rows, "errors": errors},
         "plots": comparison_plots,
         "saved_models": saved_models,
+        "pipeline_performance": pipeline_performance,
+        "comparison_performance": comparison_performance,
+        "vkr_tables": vkr_tables,
         "warnings": [f"{item['method']}: {item['error']}" for item in errors],
     }
 
 
-def _best_method(run_type: str, rows: List[Dict[str, Any]]) -> Optional[str]:
-    if not rows:
-        return None
+def _select_best_method(run_type: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Picks the best method with an explicit, documented tie-breaker chain (citable in a thesis).
+
+    Each tie-breaker is applied in order only to break ties left by the previous one; this makes
+    the choice reproducible and auditable instead of an opaque max() over a single metric.
+    """
+    candidates = [row for row in rows if row.get("status") == "success"]
+    if not candidates:
+        return {"primary_metric": None, "tie_breakers": [], "selected_method": None, "reason": "Нет успешно выполненных методов для сравнения."}
+
+    def metric_value(row: Dict[str, Any], key: str) -> Optional[float]:
+        value = (row.get("metrics") or {}).get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def kfold_value(row: Dict[str, Any], key: str) -> Optional[float]:
+        value = ((row.get("validation") or {}).get("kfold") or {}).get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def perf_value(row: Dict[str, Any], key: str) -> Optional[float]:
+        value = (row.get("performance") or {}).get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     if run_type == "compare_classification":
-        return max(rows, key=lambda row: (float(row.get("f1_macro") or 0), float(row.get("accuracy") or 0))).get("method")
-    if run_type == "compare_clustering":
-        return max(
-            rows,
-            key=lambda row: (
-                float(row.get("silhouette_score") if row.get("silhouette_score") is not None else -1),
-                float(row.get("adjusted_rand_score") if row.get("adjusted_rand_score") is not None else -1),
-                float(row.get("normalized_mutual_info_score") if row.get("normalized_mutual_info_score") is not None else -1),
-            ),
-        ).get("method")
-    if run_type == "compare_clustering":
-        return max(rows, key=lambda row: (float(row.get("adjusted_rand_score") or -1), float(row.get("normalized_mutual_info_score") or -1))).get("method")
-    return rows[0].get("method")
+        primary_metric = "f1_macro"
+        simplicity_order = ["decision_tree", "plsda", "svm", "random_forest"]
+        tie_breakers = [
+            "f1_macro (максимум)",
+            "kfold.mean f1_macro (максимум)",
+            "kfold.std f1_macro (минимум)",
+            "performance.predict_time_one_sample_ms (минимум)",
+            "performance.fit_time_sec (минимум)",
+            f"порядок простоты: {', '.join(simplicity_order)}",
+        ]
+        sort_key = lambda row: (  # noqa: E731
+            -(metric_value(row, "f1_macro") if metric_value(row, "f1_macro") is not None else -1.0),
+            -(kfold_value(row, "mean") if kfold_value(row, "mean") is not None else -1.0),
+            kfold_value(row, "std") if kfold_value(row, "std") is not None else 1.0,
+            perf_value(row, "predict_time_one_sample_ms") if perf_value(row, "predict_time_one_sample_ms") is not None else float("inf"),
+            perf_value(row, "fit_time_sec") if perf_value(row, "fit_time_sec") is not None else float("inf"),
+            simplicity_order.index(row.get("method")) if row.get("method") in simplicity_order else 99,
+        )
+    elif run_type == "compare_regression":
+        primary_metric = "rmse"
+        simplicity_order = ["pls", "svr"]
+        tie_breakers = [
+            "rmse (минимум)",
+            "r2 (максимум)",
+            "kfold.rmse_mean (минимум)",
+            "kfold.rmse_std (минимум)",
+            "performance.predict_time_one_sample_ms (минимум)",
+            "performance.fit_time_sec (минимум)",
+            f"порядок простоты: {', '.join(simplicity_order)}",
+        ]
+        sort_key = lambda row: (  # noqa: E731
+            metric_value(row, "rmse") if metric_value(row, "rmse") is not None else float("inf"),
+            -(metric_value(row, "r2") if metric_value(row, "r2") is not None else -float("inf")),
+            kfold_value(row, "rmse_mean") if kfold_value(row, "rmse_mean") is not None else float("inf"),
+            kfold_value(row, "rmse_std") if kfold_value(row, "rmse_std") is not None else float("inf"),
+            perf_value(row, "predict_time_one_sample_ms") if perf_value(row, "predict_time_one_sample_ms") is not None else float("inf"),
+            perf_value(row, "fit_time_sec") if perf_value(row, "fit_time_sec") is not None else float("inf"),
+            simplicity_order.index(row.get("method")) if row.get("method") in simplicity_order else 99,
+        )
+    elif run_type == "compare_clustering":
+        primary_metric = "silhouette_score"
+        tie_breakers = ["silhouette_score (максимум)", "adjusted_rand_score (максимум)", "normalized_mutual_info_score (максимум)"]
+        sort_key = lambda row: (  # noqa: E731
+            -(metric_value(row, "silhouette_score") if metric_value(row, "silhouette_score") is not None else -1.0),
+            -(metric_value(row, "adjusted_rand_score") if metric_value(row, "adjusted_rand_score") is not None else -1.0),
+            -(metric_value(row, "normalized_mutual_info_score") if metric_value(row, "normalized_mutual_info_score") is not None else -1.0),
+        )
+    else:
+        return {"primary_metric": None, "tie_breakers": [], "selected_method": candidates[0].get("method"), "reason": "Тип сравнения не поддерживает формализованный выбор; взят первый успешный метод."}
+
+    ranked = sorted(candidates, key=sort_key)
+    winner = ranked[0]
+    reason = (
+        f"Метод «{winner.get('method')}» выбран как лучший по метрике {primary_metric}="
+        f"{metric_value(winner, primary_metric) if run_type != 'compare_clustering' else metric_value(winner, 'silhouette_score')}; "
+        f"порядок tie-breakers: {' -> '.join(tie_breakers)}."
+    )
+    return {
+        "primary_metric": primary_metric,
+        "tie_breakers": tie_breakers,
+        "selected_method": winner.get("method"),
+        "ranked_methods": [row.get("method") for row in ranked],
+        "reason": reason,
+    }
+
+
+def _build_vkr_tables(rows: List[Dict[str, Any]], dataset_name: Optional[str], n_samples: Optional[int], n_features: Optional[int]) -> Dict[str, List[Dict[str, Any]]]:
+    """vkr_tables block for comparison runs: classification_comparison/regression_comparison +
+    performance_summary, ready for JSON/CSV/XLSX export. Reuses build_thesis_tables's row-shaping
+    logic (single source of truth with the /runs/{run_id}/thesis-tables route) and only renames keys
+    to the vkr_tables naming used by this comparison-readiness spec."""
+    shim_run = {"dataset_name": dataset_name, "n_samples": n_samples, "n_features": n_features, "results": {"method_results": rows}}
+    tables = build_thesis_tables(shim_run)
+    return {
+        "classification_comparison": tables.get("classification") or [],
+        "regression_comparison": tables.get("regression") or [],
+        "performance_summary": tables.get("performance") or [],
+    }
 
 
 def _save_single_model_run(
@@ -1285,11 +1559,26 @@ def _save_single_model_run(
             "target_name": imported.target_name,
             "target_type": summary.get("target_type"),
             "class_distribution": summary.get("class_distribution"),
+            "n_samples": summary.get("n_samples"),
+            "n_features": summary.get("n_features"),
             "methods": [trained.get("model_type") or payload.model_type],
             "best_method": trained.get("model_type") or payload.model_type,
             "status": "success",
             "summary": f"Метод {trained.get('model_type') or payload.model_type} выполнен и модель сохранена.",
-            "results": {"metrics": metrics, "saved_model": saved, "result": trained.get("result")},
+            "results": {
+                "metrics": metrics,
+                "saved_model": saved,
+                "result": trained.get("result"),
+                "performance": trained.get("performance") or {},
+                "best_params": trained.get("best_params"),
+                "hyperparameter_search": trained.get("hyperparameter_search") or {},
+                "training_policy": trained.get("training_policy") or {},
+                "reproducibility": trained.get("reproducibility") or {},
+                "outputs": trained.get("outputs") or {},
+                "test_outputs": trained.get("test_outputs") or {},
+                "full_dataset_outputs": trained.get("full_dataset_outputs") or {},
+                "validation": trained.get("validation") or {},
+            },
             "plots": [{"plot_id": f"{trained.get('model_type') or payload.model_type}_plot", "title": trained.get("model_type") or payload.model_type, **(trained.get("plot") or {})}] if trained.get("plot") else [],
             "warnings": trained.get("warnings") or [],
             "import_config": imported.import_config(),
@@ -1312,6 +1601,8 @@ async def train_model(
     do_validation: bool = Form(True),
     test_size: float = Form(0.3),
     random_state: int = Form(42),
+    hyperparameter_search: bool = Form(False),
+    refit_on_full_data: bool = Form(True),
 ):
     try:
         user = current_analysis_user(request)
@@ -1327,6 +1618,8 @@ async def train_model(
             do_validation=do_validation,
             test_size=test_size,
             random_state=random_state,
+            hyperparameter_search=hyperparameter_search,
+            refit_on_full_data=refit_on_full_data,
             metadata_extra={"user_id": user["user_id"], "username": user["username"]},
         )
         return {"status": "ok", **payload}
@@ -1362,6 +1655,72 @@ async def get_run(request: Request, run_id: str):
 @router.get("/experiments/{run_id}")
 async def get_experiment(request: Request, run_id: str):
     return await get_run(request, run_id)
+
+
+@router.get("/runs/{run_id}/status")
+async def get_run_status(request: Request, run_id: str):
+    """Polled by the frontend every 1-2s while a training/comparison job runs in the
+    background. Returns the current stage and overall status (running/success/error);
+    once status is success, the frontend follows up with GET /runs/{run_id} to fetch and
+    render the full saved result."""
+    try:
+        status = user_run_manager(current_analysis_user(request)).get_run_status(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "run_status": status}
+
+
+@router.get("/runs/{run_id}/json")
+async def get_run_json(request: Request, run_id: str):
+    """Same payload as GET /runs/{run_id}, served as a downloadable .json attachment for the
+    'Скачать полный JSON' button - the frontend reads the saved run, never recomputes it."""
+    try:
+        run = user_run_manager(current_analysis_user(request)).get(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    return StreamingResponse(
+        io.BytesIO(json.dumps(run, ensure_ascii=False, indent=2).encode("utf-8")),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}.json"'},
+    )
+
+
+@router.get("/runs/{run_id}/performance")
+async def get_run_performance(request: Request, run_id: str):
+    """Performance-only view of a saved run: per-method performance plus the run-level
+    pipeline_performance/comparison_performance blocks, for the 'Производительность' UI section."""
+    try:
+        run = user_run_manager(current_analysis_user(request)).get(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    results = run.get("results") or {}
+    method_rows = results.get("method_results") or results.get("comparison") or []
+    if method_rows:
+        methods = [
+            {
+                "method": row.get("method") or row.get("model_type"),
+                "performance": row.get("performance") or {},
+                "hyperparameter_search": row.get("hyperparameter_search") or {},
+            }
+            for row in method_rows
+        ]
+    else:
+        methods = [
+            {
+                "method": run.get("best_method"),
+                "performance": results.get("performance") or {},
+                "hyperparameter_search": results.get("hyperparameter_search") or {},
+            }
+        ]
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "methods": methods,
+        "pipeline_performance": run.get("pipeline_performance") or {},
+        "comparison_performance": run.get("comparison_performance") or {},
+    }
 
 
 @router.delete("/runs/{run_id}")
@@ -1403,6 +1762,183 @@ async def export_run_csv(request: Request, run_id: str):
         io.BytesIO(csv_payload),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{_build_run_csv_filename(run)}"'},
+    )
+
+
+@router.get("/runs/{run_id}/xlsx")
+async def export_run_xlsx(request: Request, run_id: str):
+    """Same comparison/single-model row data as /runs/{run_id}/csv, as an .xlsx workbook."""
+    try:
+        rows = user_run_manager(current_analysis_user(request)).csv_rows(run_id)
+        run = user_run_manager(current_analysis_user(request)).get(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        data = rows if rows else [{"message": "Нет данных для экспорта"}]
+        pd.DataFrame(data).to_excel(writer, sheet_name="comparison_table", index=False)
+    buffer.seek(0)
+    filename = _build_run_csv_filename(run).rsplit(".", 1)[0] + ".xlsx"
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _format_ci(ci: Any) -> Optional[str]:
+    if not isinstance(ci, (list, tuple)) or len(ci) != 2:
+        return None
+    try:
+        return f"[{float(ci[0]):.4g}, {float(ci[1]):.4g}]"
+    except (TypeError, ValueError):
+        return None
+
+
+def _permutation_summary(permutation: Dict[str, Any]) -> Any:
+    if not isinstance(permutation, dict):
+        return "skipped"
+    if permutation.get("status") == "ok":
+        return permutation.get("p_value")
+    return permutation.get("status") or "skipped"
+
+
+def _thesis_method_rows(run: Dict[str, Any]) -> List[Dict[str, Any]]:
+    results = run.get("results") or {}
+    rows = results.get("method_results") or results.get("comparison") or []
+    if rows:
+        return rows
+    saved_model = results.get("saved_model") or {}
+    return [
+        {
+            "method": saved_model.get("model_type") or run.get("best_method"),
+            "model_type": saved_model.get("model_type") or run.get("best_method"),
+            "metrics": results.get("metrics") or {},
+            "best_params": results.get("best_params"),
+            "performance": results.get("performance") or {},
+            "validation": results.get("validation") or {},
+        }
+    ]
+
+
+def build_thesis_tables(run: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """Builds the three VKR-ready tables described in the audit follow-up (classification,
+    regression, performance) from a saved run's method_results/results. Used by both the
+    JSON/CSV/XLSX export route and (indirectly) by the frontend preview."""
+    classification_rows: List[Dict[str, Any]] = []
+    regression_rows: List[Dict[str, Any]] = []
+    performance_rows: List[Dict[str, Any]] = []
+    dataset_label = run.get("dataset_name") or run.get("dataset_id") or "dataset"
+    data_size = f"{run.get('n_samples')}x{run.get('n_features')}" if run.get("n_samples") and run.get("n_features") else None
+
+    for row in _thesis_method_rows(run):
+        metrics = row.get("metrics") or {}
+        validation = row.get("validation") or {}
+        performance = row.get("performance") or {}
+        kfold = validation.get("kfold") or {}
+        bootstrap = validation.get("bootstrap") or validation.get("bootstrap_ci") or {}
+        permutation = validation.get("permutation_test") or {}
+        method_name = row.get("method") or row.get("model_type") or "unknown"
+        best_params = row.get("best_params") or {}
+
+        if "accuracy" in metrics or "f1_macro" in metrics:
+            classification_rows.append(
+                {
+                    "method": method_name,
+                    "best_params": json.dumps(best_params, ensure_ascii=False) if best_params else "",
+                    "accuracy": metrics.get("accuracy"),
+                    "precision_macro": metrics.get("precision_macro"),
+                    "recall_macro": metrics.get("recall_macro"),
+                    "f1_macro": metrics.get("f1_macro"),
+                    "kfold_f1_mean": kfold.get("mean"),
+                    "kfold_f1_std": kfold.get("std"),
+                    "bootstrap_95ci": _format_ci(bootstrap.get("ci_95")),
+                    "permutation_p_value_or_status": _permutation_summary(permutation),
+                    "fit_time_sec": performance.get("fit_time_sec"),
+                    "inference_time_ms": performance.get("predict_time_one_sample_ms"),
+                    "peak_memory_mb": performance.get("peak_memory_mb"),
+                }
+            )
+        elif "rmse" in metrics or "r2" in metrics:
+            regression_rows.append(
+                {
+                    "method": method_name,
+                    "best_params": json.dumps(best_params, ensure_ascii=False) if best_params else "",
+                    "mae": metrics.get("mae"),
+                    "rmse": metrics.get("rmse"),
+                    "r2": metrics.get("r2"),
+                    "kfold_rmse_mean": kfold.get("rmse_mean"),
+                    "kfold_rmse_std": kfold.get("rmse_std"),
+                    "kfold_r2_mean": kfold.get("r2_mean"),
+                    "kfold_r2_std": kfold.get("r2_std"),
+                    "bootstrap_95ci": _format_ci(bootstrap.get("ci_95")),
+                    "permutation_p_value_or_status": _permutation_summary(permutation),
+                    "fit_time_sec": performance.get("fit_time_sec"),
+                    "inference_time_ms": performance.get("predict_time_one_sample_ms"),
+                    "peak_memory_mb": performance.get("peak_memory_mb"),
+                }
+            )
+
+        performance_rows.append(
+            {
+                "operation": f"train+validate ({method_name})",
+                "dataset": dataset_label,
+                "data_size": data_size,
+                "execution_time_sec": performance.get("total_time_sec"),
+                "peak_memory_mb": performance.get("peak_memory_mb"),
+            }
+        )
+
+    return {"classification": classification_rows, "regression": regression_rows, "performance": performance_rows}
+
+
+@router.get("/runs/{run_id}/thesis-tables")
+async def export_run_thesis_tables(request: Request, run_id: str, format: str = Query("json", pattern="^(json|csv|xlsx)$")):
+    """Flat, VKR-ready tables (classification/regression/performance) built from a saved run.
+
+    format=json returns all three tables in one object; format=csv returns a ZIP with one CSV
+    per non-empty table; format=xlsx returns a single workbook with one sheet per table.
+    """
+    try:
+        run = user_run_manager(current_analysis_user(request)).get(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Эксперимент не найден") from exc
+    tables = build_thesis_tables(run)
+
+    if format == "json":
+        return {"status": "ok", "run_id": run_id, "tables": tables}
+
+    if format == "csv":
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, rows in tables.items():
+                if not rows:
+                    continue
+                csv_buffer = io.StringIO()
+                pd.DataFrame(rows).to_csv(csv_buffer, index=False)
+                archive.writestr(f"{name}.csv", csv_buffer.getvalue())
+        buffer.seek(0)
+        return StreamingResponse(
+            buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{run_id}_thesis_tables.zip"'},
+        )
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        any_sheet = False
+        for name, rows in tables.items():
+            if not rows:
+                continue
+            pd.DataFrame(rows).to_excel(writer, sheet_name=name[:31], index=False)
+            any_sheet = True
+        if not any_sheet:
+            pd.DataFrame([{"message": "Нет данных для таблиц ВКР в этом запуске"}]).to_excel(writer, sheet_name="info", index=False)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{run_id}_thesis_tables.xlsx"'},
     )
 
 
@@ -1665,6 +2201,11 @@ async def infer_model(
     except Exception as exc:
         logger.exception("Unexpected inference error")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка применения модели") from exc
+
+
+@router.post("/model/infer")
+async def model_infer(request: Request, file: UploadFile = File(...), model_type: str = Form(...), model_id: str = Form(...)):
+    return await infer_model(request, file, model_type, model_id)
 
 
 @router.post("/infer-batch")

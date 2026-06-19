@@ -658,6 +658,39 @@
                     <input id="save-model-after-training" type="checkbox" checked>
                     <span>Сохранить модель после обучения</span>
                 </label>
+                <label class="check-row" id="detailed-calculation-wrap">
+                    <input id="detailed-calculation" type="checkbox">
+                    <span>Подробный расчёт (полный ВКР-режим: bootstrap=1000, permutation=200, полная сетка GridSearchCV). По умолчанию используется быстрый режим (bootstrap=100, permutation=50, сокращённая сетка), чтобы сайт не "висел" во время расчёта.</span>
+                </label>
+                <label class="check-row" id="hyperparameter-search-wrap">
+                    <input id="hyperparameter-search" type="checkbox">
+                    <span>Подбор гиперпараметров (GridSearchCV на train-части)</span>
+                </label>
+                <label class="check-row" id="refit-on-full-data-wrap">
+                    <input id="refit-on-full-data" type="checkbox" checked>
+                    <span>Переобучить итоговую модель на всех данных после оценки</span>
+                </label>
+                <label class="check-row" id="kfold-enabled-wrap">
+                    <input id="kfold-enabled" type="checkbox" checked>
+                    <span>k-fold проверка</span>
+                </label>
+                <label id="n-splits-wrap">Число фолдов (n_splits)
+                    <input id="n-splits" class="input-field" type="number" min="2" max="10" step="1" value="5">
+                </label>
+                <label class="check-row" id="bootstrap-enabled-wrap">
+                    <input id="bootstrap-enabled" type="checkbox" checked>
+                    <span>bootstrap-интервалы</span>
+                </label>
+                <label id="n-bootstrap-wrap">Число bootstrap-итераций (n_bootstrap)
+                    <input id="n-bootstrap" class="input-field" type="number" min="100" max="5000" step="100" value="1000">
+                </label>
+                <label class="check-row" id="permutation-enabled-wrap">
+                    <input id="permutation-enabled" type="checkbox" checked>
+                    <span>permutation test (только PLS-DA / PLS Regression)</span>
+                </label>
+                <label id="n-permutations-wrap">Число перестановок (n_permutations)
+                    <input id="n-permutations" class="input-field" type="number" min="20" max="2000" step="20" value="200">
+                </label>
             </div>
 
             <div id="analysis-run-summary" class="analysis-run-summary"></div>
@@ -723,16 +756,21 @@
             <div class="result-tabs" role="tablist" aria-label="Разделы результата">
                 <button type="button" class="result-tab result-tab--active" data-result-tab="summary">Сводка</button>
                 <button type="button" class="result-tab" data-result-tab="metrics">Метрики</button>
+                <button type="button" class="result-tab" data-result-tab="details">Подробности</button>
                 <button type="button" class="result-tab" data-result-tab="plots">Графики</button>
                 <button type="button" class="result-tab" data-result-tab="download">Скачать</button>
                 <button type="button" class="result-tab" data-result-tab="json">JSON</button>
             </div>
             <div class="result-panel" data-result-panel="summary">
                 <div id="result-explainer" class="result-note"></div>
+                <div id="result-summary-card" class="result-summary-card"></div>
             </div>
             <div class="result-panel" data-result-panel="metrics" style="display:none;">
                 <div id="validation-summary" class="metrics-grid"></div>
                 <div id="comparison-result" class="result-box"></div>
+            </div>
+            <div class="result-panel" data-result-panel="details" style="display:none;">
+                <div id="run-details-block" class="result-box"></div>
             </div>
             <div class="result-panel" data-result-panel="plots" style="display:none;">
                 <div id="validation-plot" class="plot-box plot-box-small"></div>

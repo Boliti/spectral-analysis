@@ -41,6 +41,7 @@ class ModelConfig:
     n_estimators: int = 200
     class_weight: Optional[str] = None
     max_depth: Optional[int] = None
+    min_samples_split: int = 2
     linkage: str = "ward"
 
 
@@ -368,7 +369,7 @@ class SVMClassifier(SklearnClassifierModel):
                         kernel=self.config.kernel,
                         C=float(self.config.C),
                         gamma=self.config.gamma,
-                        probability=True,
+                        probability=False,
                         class_weight=self.config.class_weight,
                         random_state=int(self.config.random_state),
                     ),
@@ -386,6 +387,7 @@ class RandomForestClassifierModel(SklearnClassifierModel):
             n_estimators=int(self.config.n_estimators),
             random_state=int(self.config.random_state),
             class_weight=self.config.class_weight,
+            min_samples_split=int(self.config.min_samples_split or 2),
         )
 
 
@@ -398,6 +400,7 @@ class DecisionTreeClassifierModel(SklearnClassifierModel):
             random_state=int(self.config.random_state),
             max_depth=self.config.max_depth,
             class_weight=self.config.class_weight,
+            min_samples_split=int(self.config.min_samples_split or 2),
         )
 
 
@@ -489,10 +492,18 @@ class HCAClusterModel(BaseAnalysisModel):
         return result
 
     def inference_result(self, x: np.ndarray) -> Dict[str, Any]:
-        return {"message": "HCA обучается как кластеризация текущего датасета; применение к новым спектрам не реализовано."}
+        raise ValueError(
+            "This saved HCA result cannot be used for direct prediction on new spectra. "
+            "Re-run clustering on the full dataset."
+        )
 
     def get_params(self) -> Dict[str, Any]:
-        return dict(self.config.__dict__)
+        params = dict(self.config.__dict__)
+        params["can_infer_new_samples"] = False
+        params["limitations"] = [
+            "HCA does not support direct inference for new spectra because AgglomerativeClustering has no predict method."
+        ]
+        return params
 
 
 class SVRRegressionModel(BaseAnalysisModel):
@@ -535,41 +546,6 @@ class SVRRegressionModel(BaseAnalysisModel):
         return dict(self.config.__dict__)
 
 
-class MCRALSStubModel(BaseAnalysisModel):
-    model_type = "mcr_als"
-    supervised = False
-
-    def __init__(self, config: Optional[ModelConfig] = None):
-        self.config = config or ModelConfig()
-        self.mean_spectrum: Optional[np.ndarray] = None
-
-    def fit(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> None:
-        self.mean_spectrum = np.mean(x, axis=0)
-
-    def predict(self, x: np.ndarray) -> np.ndarray:
-        if self.mean_spectrum is None:
-            raise ValueError("MCR-ALS stub model is not fitted")
-        return np.tile(self.mean_spectrum, (x.shape[0], 1))
-
-    def training_result(self, x: np.ndarray, y: Optional[np.ndarray] = None) -> Dict[str, Any]:
-        reconstructed = self.predict(x)
-        residual = np.mean(np.abs(x - reconstructed), axis=1)
-        return {
-            "message": "MCR-ALS реализован как расширяемый stub. Добавьте полноценный ALS solver в будущем.",
-            "mean_absolute_residual": residual.tolist(),
-        }
-
-    def inference_result(self, x: np.ndarray) -> Dict[str, Any]:
-        reconstructed = self.predict(x)
-        return {
-            "message": "MCR-ALS stub inference выполнен.",
-            "reconstructed_preview": reconstructed[: min(3, len(reconstructed))].tolist(),
-        }
-
-    def get_params(self) -> Dict[str, Any]:
-        return {"stub": True, "n_components": self.config.n_components}
-
-
 def create_model(
     model_type: str,
     n_components: Optional[int] = None,
@@ -602,15 +578,15 @@ def create_model(
         "hca": HCAClusterModel,
         "hierarchical": HCAClusterModel,
         "svr": SVRRegressionModel,
-        "mcr_als": MCRALSStubModel,
-        "mcr-als": MCRALSStubModel,
     }
     model_cls = registry.get(normalized)
     if model_cls is None:
+        if normalized in {"mcr_als", "mcr-als"}:
+            raise ValueError("MCR-ALS is not implemented in current version")
         supported = ", ".join(sorted(registry.keys()))
         raise ValueError(f"Неизвестный тип модели '{model_type}'. Поддерживается: {supported}")
     return model_cls(config=config)
 
 
 def supported_model_types() -> List[str]:
-    return ["pca", "pls", "plsda", "svm", "random_forest", "decision_tree", "kmeans", "hca", "svr", "mcr_als"]
+    return ["pca", "pls", "plsda", "svm", "random_forest", "decision_tree", "kmeans", "hca", "svr"]
