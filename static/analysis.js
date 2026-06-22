@@ -874,7 +874,7 @@ function updateModelAdvancedSettings(modelType) {
         node.style.display = !simple && allowed.has(node.dataset.modelParam) ? "flex" : "none";
     });
     if (methodParamsFields) methodParamsFields.style.display = simple ? "none" : "";
-    // ВКР mode: compare_classification/compare_regression need an honest holdout split and
+    // Detailed comparison mode: compare_classification/compare_regression need an honest holdout split and
     // GridSearchCV by default, regardless of leftover validation/hyperparameter-search toggle
     // state left over from a previous (e.g. exploratory PCA) step.
     if (modelType === "compare_classification" || modelType === "compare_regression") {
@@ -1084,6 +1084,17 @@ function metricCard(title, value) {
     return div;
 }
 
+function appendMetricCard(container, title, value, className = "") {
+    if (!container || !isMeaningfulValue(value)) return;
+    const card = metricCard(title, escapeHtml(String(value)));
+    if (className) card.classList.add(className);
+    container.appendChild(card);
+}
+
+function formatMetricValue(value) {
+    return typeof value === "number" ? value.toFixed(4) : fmtNoData(value);
+}
+
 function renderTrainingMetaCards(payload = {}) {
     if (!validationSummary) return;
     const trainingPolicy = payload.training_policy;
@@ -1133,7 +1144,6 @@ function renderTrainingMetaCards(payload = {}) {
 }
 
 function renderValidationBlock(validation, payload = {}) {
-    renderTrainingMetaCards(payload);
     if (!validation || validation.status !== "ok") {
         if (validation && validation.reason) {
             resultExplainer.textContent += `\nВалидация: ${validation.reason}`;
@@ -1141,37 +1151,49 @@ function renderValidationBlock(validation, payload = {}) {
         return;
     }
 
-    const metrics = validation.metrics || {};
-    Object.entries(metrics).forEach(([key, val]) => {
-        const num = typeof val === "number" ? val.toFixed(4) : String(val);
-        validationSummary.appendChild(metricCard(key, num));
-    });
-        validationSummary.appendChild(metricCard("обучающих спектров", validation.train_samples));
-    validationSummary.appendChild(metricCard("тестовых спектров", validation.test_samples));
+    const checksWrap = document.createElement("div");
+    checksWrap.className = "metrics-section-grid";
+    const checksTitle = document.createElement("h4");
+    checksTitle.className = "metrics-section-title";
+    checksTitle.textContent = "Проверочные метрики";
+    validationSummary.appendChild(checksTitle);
+    validationSummary.appendChild(checksWrap);
 
     const kfold = validation.kfold;
     if (kfold && kfold.status === "ok" && kfold.mean_std) {
-        Object.entries(kfold.mean_std).forEach(([metricName, stats]) => {
-            validationSummary.appendChild(metricCard(`k-fold ${metricName}: среднее`, Number(stats.mean).toFixed(4)));
-            validationSummary.appendChild(metricCard(`k-fold ${metricName}: std`, Number(stats.std).toFixed(4)));
+        ["accuracy", "f1_macro"].forEach((metricName) => {
+            const stats = kfold.mean_std?.[metricName];
+            if (!stats) return;
+            appendMetricCard(checksWrap, `k-fold ${metricName} mean`, Number(stats.mean).toFixed(4));
+            appendMetricCard(checksWrap, `k-fold ${metricName} std`, Number(stats.std).toFixed(4));
         });
+    } else if (kfold && kfold.status) {
+        appendMetricCard(checksWrap, "k-fold", kfold.status === "skipped" ? (kfold.reason || "пропущено") : kfold.status);
     }
 
     const permutation = validation.permutation_test;
     if (permutation && permutation.status === "ok") {
-        validationSummary.appendChild(metricCard("перестановочный тест: метрика", permutation.metric));
-        validationSummary.appendChild(metricCard("перестановочный тест: значение", Number(permutation.observed_score).toFixed(4)));
-        validationSummary.appendChild(metricCard("перестановочный тест: p-value", Number(permutation.p_value).toFixed(4)));
+        appendMetricCard(checksWrap, "permutation metric", permutation.metric);
+        appendMetricCard(checksWrap, "permutation value", Number(permutation.observed_score).toFixed(4));
+        appendMetricCard(checksWrap, "permutation p-value", Number(permutation.p_value).toFixed(4));
+    } else if (permutation && permutation.status) {
+        appendMetricCard(checksWrap, "permutation test", permutationStatusText(permutation));
     }
 
-    const bootstrap = validation.bootstrap_ci;
+    const bootstrap = validation.bootstrap || validation.bootstrap_ci;
     if (bootstrap && bootstrap.status === "ok") {
         Object.entries(bootstrap).forEach(([k, v]) => {
             if (!k.endsWith("_95ci") || !Array.isArray(v) || v.length !== 2) {
                 return;
             }
-            validationSummary.appendChild(metricCard(k, `[${Number(v[0]).toFixed(4)}, ${Number(v[1]).toFixed(4)}]`));
+            appendMetricCard(checksWrap, k, `[${Number(v[0]).toFixed(4)}, ${Number(v[1]).toFixed(4)}]`);
         });
+    } else if (bootstrap && bootstrap.status) {
+        appendMetricCard(checksWrap, "confidence intervals", bootstrap.status === "skipped" ? (bootstrap.reason || "пропущено") : bootstrap.status);
+    }
+
+    if (!checksWrap.children.length) {
+        checksWrap.innerHTML = '<p class="muted">Проверочные метрики не рассчитывались в текущем запуске.</p>';
     }
 
     if (Array.isArray(validation.limitations) && validation.limitations.length > 0) {
@@ -1503,10 +1525,6 @@ function appendRegressionPredictionsTable(predictions) {
         </tr>
     `).join("");
     comparisonResult.insertAdjacentHTML("beforeend", `
-        <div class="line-controls wrap" style="margin-top:12px;">
-            <button type="button" class="btn" data-download-predictions-csv>Скачать предсказания CSV</button>
-            <button type="button" class="btn" data-download-result-json>Скачать результат JSON</button>
-        </div>
         <table class="comparison-table compact-table">
             <thead><tr><th>Образец</th><th>Истинное значение</th><th>Предсказанное значение</th><th>Остаток</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
@@ -1605,8 +1623,8 @@ function renderMetricsTable(rows, bestMethod = "") {
     const metricKeys = ["accuracy", "precision_macro", "recall_macro", "f1_macro", "r2", "mae", "rmse", "n_clusters", "inertia", "silhouette_score", "cluster_distribution", "adjusted_rand_score", "normalized_mutual_info_score"];
     const activeKeys = metricKeys.filter((key) => rows.some((row) => row[key] !== undefined || row.metrics?.[key] !== undefined));
     const showExtras = rows.some((row) => row.best_params || row.performance || row.validation);
-    const extraHeads = showExtras ? ["Best params", "K-fold", "Bootstrap 95% CI", "Permutation", "Время обучения, с", "Инференс, мс", "Память, МБ"] : [];
-    const head = ["Метод", ...activeKeys.map(formatMetricName), ...extraHeads, "Статус"].map((v) => `<th>${escapeHtml(v)}</th>`).join("");
+    const extraHeads = showExtras ? ["Best params", "K-fold", "Bootstrap 95% CI", "Permutation", "Обучение, с", "Инференс, мс", "Память, МБ"] : [];
+    const head = ["Метод", ...activeKeys.map(formatMetricName), ...extraHeads, "Статус"].map((v) => `<th title="${escapeHtml(v)}">${escapeHtml(v)}</th>`).join("");
     const body = rows.map((row) => {
         const metrics = row.metrics || row;
         const cells = activeKeys.map((key) => {
@@ -1619,7 +1637,9 @@ function renderMetricsTable(rows, bestMethod = "") {
         return `<tr class="${cls}"><td><strong>${escapeHtml(methodTitle)}</strong></td>${cells}${extraCells}<td>${statusBadge(row.status || "success")}</td></tr>`;
     }).join("");
     comparisonResult.innerHTML = `
-        <table class="comparison-table compact-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+        <div class="table-scroll">
+            <table class="comparison-table compact-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+        </div>
         <div class="metric-help">${metricHelpText(activeKeys)}</div>
     `;
 }
@@ -1813,7 +1833,65 @@ function buildPermutationBlockHtml(validation) {
     return `<div class="metadata-pairs">${rows.map(([l, v]) => `<span><b>${escapeHtml(l)}</b>: ${escapeHtml(String(v))}</span>`).join("")}</div>`;
 }
 
-function buildValidationDetailsHtml(row, index, taskKind) {
+function previewArray(values, limit = 20) {
+    if (!Array.isArray(values)) return "нет данных";
+    const shown = values.slice(0, limit).map((value) => {
+        if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(4) : String(value);
+        return String(value);
+    });
+    return `${shown.join(", ")}${values.length > limit ? `, ... (${values.length} всего)` : ""}`;
+}
+
+function technicalJsonBlock(title, value) {
+    if (!isMeaningfulValue(value)) return "";
+    return `
+        <details class="hp-details technical-json-block">
+            <summary>${escapeHtml(title)}</summary>
+            <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+        </details>`;
+}
+
+function buildPredictionPreviewTable(testOutputs = {}, taskKind = "classification") {
+    if (!Array.isArray(testOutputs.y_true) || !Array.isArray(testOutputs.y_pred)) return "";
+    const n = Math.min(20, testOutputs.y_true.length);
+    const body = Array.from({ length: n }, (_, i) => {
+        const yTrue = taskKind === "regression" && typeof testOutputs.y_true[i] === "number" ? Number(testOutputs.y_true[i]).toFixed(4) : String(testOutputs.y_true[i]);
+        const yPred = taskKind === "regression" && typeof testOutputs.y_pred[i] === "number" ? Number(testOutputs.y_pred[i]).toFixed(4) : String(testOutputs.y_pred[i]);
+        const residual = taskKind === "regression" ? `<td>${Number(testOutputs.residuals?.[i] ?? 0).toFixed(4)}</td>` : "";
+        return `<tr><td>${i + 1}</td><td>${escapeHtml(yTrue)}</td><td>${escapeHtml(yPred)}</td>${residual}</tr>`;
+    }).join("");
+    const residualHead = taskKind === "regression" ? "<th>остаток</th>" : "";
+    const more = testOutputs.y_true.length > n ? `<p class="muted">Показаны первые ${n} из ${testOutputs.y_true.length} значений.</p>` : "";
+    return `
+        ${more}
+        <table class="compact-table"><thead><tr><th>#</th><th>y_true</th><th>y_pred</th>${residualHead}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function buildTechnicalDataHtml(row, taskKind) {
+    const validation = row.validation || {};
+    const testOutputs = row.test_outputs || {};
+    const fullOutputs = row.full_dataset_outputs || row.outputs || {};
+    const summaryRows = [
+        ["classes", previewArray(validation.classes || testOutputs.classes || fullOutputs.classes, 20)],
+        ["y_true", previewArray(testOutputs.y_true, 20)],
+        ["y_pred", previewArray(testOutputs.y_pred, 20)],
+        ["confusion_matrix", Array.isArray(validation.confusion_matrix) ? `${validation.confusion_matrix.length} x ${validation.confusion_matrix[0]?.length || 0}` : ""],
+    ];
+    return `
+        <details class="hp-details technical-data-details">
+            <summary>Показать технические данные</summary>
+            <div class="metadata-pairs">
+                ${summaryRows.filter(([, value]) => isMeaningfulValue(value)).map(([l, v]) => `<span><b>${escapeHtml(l)}</b>: ${escapeHtml(String(v))}</span>`).join("")}
+            </div>
+            ${buildPredictionPreviewTable(testOutputs, taskKind)}
+            ${technicalJsonBlock("confusion_matrix", validation.confusion_matrix || testOutputs.confusion_matrix || fullOutputs.confusion_matrix)}
+            ${technicalJsonBlock("classes", validation.classes || testOutputs.classes || fullOutputs.classes)}
+            ${technicalJsonBlock("test_outputs", testOutputs)}
+            ${technicalJsonBlock("full_dataset_outputs", fullOutputs)}
+        </details>`;
+}
+
+function buildValidationDetailsHtml(row, taskKind) {
     const validation = row.validation || {};
     const sourceText = validation.status === "ok" ? "holdout_test_split" : fmtNoData(validation.reason);
     const head = [
@@ -1823,30 +1901,10 @@ function buildValidationDetailsHtml(row, index, taskKind) {
         ["test_samples", fmtNoData(validation.test_samples)],
         ["Источник метрик", sourceText],
     ];
-    const cmId = `run-details-cm-${index}`;
-    const predId = `run-details-pred-${index}`;
-    let visual = "";
-    if (taskKind === "classification") {
-        visual = `<div id="${cmId}" class="plot-box plot-box-small"></div>`;
-    } else if (taskKind === "regression") {
-        visual = `<div id="${predId}" class="plot-box plot-box-small"></div>`;
-    }
-    const testOutputs = row.test_outputs || {};
-    let previewTable = "";
-    if (validation.status === "ok" && taskKind === "classification" && Array.isArray(testOutputs.y_true)) {
-        const n = Math.min(10, testOutputs.y_true.length);
-        const body = Array.from({ length: n }, (_, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(String(testOutputs.y_true[i]))}</td><td>${escapeHtml(String(testOutputs.y_pred[i]))}</td></tr>`).join("");
-        previewTable = `<table class="compact-table"><thead><tr><th>#</th><th>y_true (test)</th><th>y_pred (test)</th></tr></thead><tbody>${body}</tbody></table>`;
-    } else if (validation.status === "ok" && taskKind === "regression" && Array.isArray(testOutputs.y_true)) {
-        const n = Math.min(10, testOutputs.y_true.length);
-        const body = Array.from({ length: n }, (_, i) => `<tr><td>${i + 1}</td><td>${Number(testOutputs.y_true[i]).toFixed(4)}</td><td>${Number(testOutputs.y_pred[i]).toFixed(4)}</td><td>${Number(testOutputs.residuals?.[i] ?? 0).toFixed(4)}</td></tr>`).join("");
-        previewTable = `<table class="compact-table"><thead><tr><th>#</th><th>y_true (test)</th><th>y_pred (test)</th><th>остаток</th></tr></thead><tbody>${body}</tbody></table>`;
-    }
     return `
         <div class="metadata-pairs">${head.map(([l, v]) => `<span><b>${escapeHtml(l)}</b>: ${escapeHtml(String(v))}</span>`).join("")}</div>
         ${validation.status !== "ok" ? `<p class="muted">Валидация не выполнена: ${escapeHtml(validation.reason || "нет данных")}</p>` : ""}
-        ${visual}
-        ${previewTable}`;
+        ${buildTechnicalDataHtml(row, taskKind)}`;
 }
 
 function buildTestVsFullOutputsHtml(row) {
@@ -1882,7 +1940,7 @@ function buildPerformanceTableHtml(rows) {
             <td>${fmtNoData(performance.peak_memory_mb, (v) => v.toFixed(2))}</td>
         </tr>`;
     }).join("");
-    return `<table class="comparison-table compact-table"><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+    return `<div class="table-scroll"><table class="comparison-table compact-table"><thead><tr>${head.map((h) => `<th title="${escapeHtml(h)}">${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function buildPipelinePerformanceHtml(pipelinePerformance, comparisonPerformance) {
@@ -1904,6 +1962,24 @@ function buildPipelinePerformanceHtml(pipelinePerformance, comparisonPerformance
         <div class="metadata-pairs">${rows.map(([l, v]) => `<span><b>${escapeHtml(l)}</b>: ${escapeHtml(String(v))}</span>`).join("")}</div>`;
 }
 
+function buildRunDetailsHeroHtml(run, rows) {
+    const row = rows[0] || {};
+    const method = ANALYSIS_METHOD_INFO[row.method || row.model_type]?.[0] || row.method || row.model_type || run.best_method || "метод";
+    const datasetName = run.dataset_name || run.dataset_id || importedDatasetSummary?.dataset_name || importedDatasetId || "датасет";
+    const summary = importedDatasetSummary || {};
+    const samples = run.dataset_summary?.n_samples || summary.n_samples || row.validation?.train_samples + row.validation?.test_samples || "";
+    const features = run.dataset_summary?.n_features || summary.n_features || "";
+    const parts = [
+        escapeHtml(method),
+        statusBadge(row.status || run.status || "success"),
+        escapeHtml(row.model_id || run.results?.saved_model?.model_id || "model"),
+        `датасет ${escapeHtml(shortText(datasetName, 54))}`,
+        samples ? `${escapeHtml(String(samples))} спектров` : "",
+        features ? `${escapeHtml(String(features))} признаков` : "",
+    ].filter(Boolean);
+    return `<div class="run-details-hero">${parts.map((part) => `<span>${part}</span>`).join("")}</div>`;
+}
+
 function buildMethodDetailsHtml(row, index) {
     const method = row.method || row.model_type || `method_${index + 1}`;
     const methodTitle = ANALYSIS_METHOD_INFO[method]?.[0] || method;
@@ -1913,9 +1989,9 @@ function buildMethodDetailsHtml(row, index) {
             <h4>${escapeHtml(methodTitle)} ${statusBadge(row.status || "success")}</h4>
             <div class="muted">model_id: ${escapeHtml(row.model_id || "нет данных")}</div>
             ${buildHyperparametersDetailsHtml(row)}
-            <details class="hp-details" open>
+            <details class="hp-details">
                 <summary>Validation</summary>
-                ${buildValidationDetailsHtml(row, index, taskKind)}
+                ${buildValidationDetailsHtml(row, taskKind)}
             </details>
             <details class="hp-details">
                 <summary>k-fold</summary>
@@ -1981,12 +2057,13 @@ function renderRunDetailsTab(run) {
         return;
     }
     const bestSelection = run.best_method_selection;
-    let html = "";
+    let html = buildRunDetailsHeroHtml(run, rows);
     if (bestSelection && bestSelection.selected_method) {
         html += `<div class="ui-alert ui-alert--info"><b>Выбор лучшего метода:</b> ${escapeHtml(bestSelection.reason || "")}</div>`;
     }
-    html += buildPipelinePerformanceHtml(run.pipeline_performance, run.comparison_performance);
-    html += `<h4>Производительность по методам</h4>${buildPerformanceTableHtml(rows)}`;
+    const pipelineHtml = buildPipelinePerformanceHtml(run.pipeline_performance, run.comparison_performance);
+    if (pipelineHtml) html += `<section class="details-report-section">${pipelineHtml}</section>`;
+    html += `<section class="details-report-section"><h4>Производительность</h4>${buildPerformanceTableHtml(rows)}</section>`;
     rows.forEach((row, index) => {
         html += buildMethodDetailsHtml(row, index);
     });
@@ -1995,27 +2072,36 @@ function renderRunDetailsTab(run) {
 }
 
 function buildResultSummaryCardHtml(payload = {}, run = {}) {
-    const merged = { ...run, ...payload };
     const rows = methodRowsForRun(run.run_id ? run : { results: payload.result, best_method: payload.best_method });
-    const anyValidationOk = rows.some((row) => (row.validation || {}).status === "ok");
-    const validationText = anyValidationOk ? "holdout 70/30 (или заданная доля), train/test" : "не выполнена / нет данных";
-    const sourceText = anyValidationOk ? "holdout_test_split" : "нет данных";
-    const trainTest = rows.find((row) => (row.validation || {}).status === "ok")?.validation || {};
+    const bestRow = rows.find((row) => row.method === (payload.best_method || run.best_method)) || rows[0] || {};
+    const results = payload.result || run.results || payload || {};
+    const validation = bestRow.validation || results.validation || {};
+    const metrics = bestRow.metrics || results.metrics || validation.metrics || {};
+    const performance = bestRow.performance || results.performance || {};
+    const trainingPolicy = results.training_policy || payload.training_policy || {};
+    const modelName = payload.best_method || run.best_method || bestRow.method || bestRow.model_type || payload.model_type || "нет данных";
+    const metricsSource = trainingPolicy.metrics_source || (validation.status === "ok" ? "holdout_test_split" : "нет данных");
+    const validationMode = validation.mode || (validation.status === "ok" ? "train/test" : "не выполнена");
     const items = [
-        ["ID запуска", payload.run_id || run.run_id || "нет данных"],
-        ["Дата и время", formatDateTime(run.created_at) || "нет данных"],
-        ["Датасет", run.dataset_name || run.dataset_id || payload.dataset_id || "нет данных"],
-        ["Версия данных", formatDatasetVersion(payload.dataset_version || (run.used_processed_data ? "processed" : "raw"))],
-        ["Задача", formatTask(payload.task_type || run.run_type || "analysis")],
-        ["Методы", (run.methods || []).join(", ") || run.best_method || payload.model_type || "нет данных"],
-        ["Лучший метод", payload.best_method || run.best_method || "нет данных"],
-        ["Validation", validationText],
-        ["Источник метрик", sourceText],
-        ["train_samples / test_samples", `${fmtNoData(trainTest.train_samples)} / ${fmtNoData(trainTest.test_samples)}`],
-        ["random_state", run.results?.reproducibility?.random_state ?? "42"],
-        ["Статус", formatStatus(payload.status || run.status || "success")],
+        ["Модель", ANALYSIS_METHOD_INFO[modelName]?.[0] || modelName],
+        ["Источник метрик", metricsSource === "holdout_test_split" ? "holdout (test)" : metricsSource],
+        ["Время обучения", fmtTimeSec(performance.fit_time_sec)],
+        ["Инференс на 1 спектр", fmtMs(performance.predict_time_one_sample_ms)],
+        ["Пиковая память", fmtMb(performance.peak_memory_mb)],
+        ["accuracy", formatMetricValue(metrics.accuracy)],
+        ["precision_macro", formatMetricValue(metrics.precision_macro)],
+        ["recall_macro", formatMetricValue(metrics.recall_macro)],
+        ["f1_macro", formatMetricValue(metrics.f1_macro)],
+        ["train samples", fmtNoData(validation.train_samples)],
+        ["test samples", fmtNoData(validation.test_samples)],
+        ["validation mode", validationMode],
     ];
-    return `<div class="metadata-pairs">${items.map(([l, v]) => `<span><b>${escapeHtml(l)}</b>: ${escapeHtml(String(v))}</span>`).join("")}</div>`;
+    return `<div class="result-summary-grid">${items.map(([label, value]) => `
+        <div class="metric-card metric-card--compact">
+            <div class="metric-title">${escapeHtml(label)}</div>
+            <div class="metric-value" title="${escapeHtml(String(value))}">${escapeHtml(shortText(String(value), 64))}</div>
+        </div>
+    `).join("")}</div>`;
 }
 
 function renderPlot(plotPayload) {
@@ -2267,21 +2353,16 @@ function downloadRunCsv(runId) {
 
 function updateResultDownloads(runId = lastRenderedRunId) {
     if (!resultDownloads) return;
-    const buttons = [
-        `<button type="button" class="btn" data-run-csv="${escapeHtml(runId || "")}">Скачать CSV результата</button>`,
-        lastPredictionRows.length
-            ? `<button type="button" class="btn" data-download-predictions-csv>Скачать CSV результатов</button>`
-            : `<button type="button" class="btn" data-download-comparison-csv>Скачать CSV результатов</button>`,
-        `<button type="button" class="btn" data-download-result-json>Скачать JSON результата</button>`,
-    ];
+    const buttons = [];
     if (runId) {
-        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/json">Скачать полный JSON (сохранённый run)</a>`);
-        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/xlsx">Скачать таблицу сравнения XLSX</a>`);
+        buttons.push(`<button type="button" class="btn" data-run-csv="${escapeHtml(runId)}">Скачать CSV результата</button>`);
+        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/json">Скачать полный JSON эксперимента</a>`);
+        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/xlsx">Скачать XLSX сравнения</a>`);
         buttons.push(`<button type="button" class="btn" data-run-export="${escapeHtml(runId)}">Скачать ZIP эксперимента</button>`);
         buttons.push(`<a class="btn" href="/analysis/reports/from-run/${encodeURIComponent(runId)}">Скачать HTML-отчёт</a>`);
-        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/thesis-tables?format=csv" title="Таблицы для классификации/регрессии/производительности, готовые для вставки в ВКР">Таблицы для ВКР (CSV)</a>`);
-        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/thesis-tables?format=xlsx">Таблицы для ВКР (XLSX)</a>`);
-        buttons.push(`<a class="btn" href="/analysis/runs/${encodeURIComponent(runId)}/thesis-tables?format=json">Таблицы для ВКР (JSON)</a>`);
+    } else {
+        if (lastComparisonRows.length) buttons.push(`<button type="button" class="btn" data-download-comparison-csv>Скачать CSV результата</button>`);
+        buttons.push(`<button type="button" class="btn" data-download-result-json>Скачать JSON результата</button>`);
     }
     resultDownloads.innerHTML = buttons.join("");
 }
@@ -2973,19 +3054,16 @@ function renderDatasetReady(summary) {
     const distribution = summary.class_distribution || {};
     const classes = Object.keys(distribution).length
         ? Object.entries(distribution).map(([cls, count]) => `${cls} — ${count}`).join(", ")
-        : "нет целевой переменной";
-    const targetInfo = summary.target_type === "numeric"
-        ? `числовая, ${formatNumber(summary.target_min)}-${formatNumber(summary.target_max)}, уровней: ${summary.target_unique_count ?? "н/д"}`
-        : classes;
+        : (Array.isArray(summary.classes) && summary.classes.length ? summary.classes.join(", ") : "нет");
     const tiles = [
         ["Датасет", summary.metadata?.dataset_name || summary.dataset_name || importedDatasetId || "н/д", "dataset"],
         ["Спектров", summary.n_samples, "count"],
         ["Признаков", summary.n_features, "count"],
         ["Целевая переменная", formatTargetName(summary.target_name || "none"), summary.target_name ? "target" : "warning"],
-        [summary.target_type === "numeric" ? "Тип целевой переменной" : "Классы", targetInfo, "classes"],
+        ["Классы", classes, classes === "нет" ? "warning" : "classes"],
         ["Задача", formatTask(summary.task_recommendation || "analysis"), "task"],
         ["Диапазон", `${formatNumber(summary.axis_min)}-${formatNumber(summary.axis_max)}`, "range"],
-        ["NAN/INF", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
+        ["NaN/Inf", summary.nan_count ?? 0, Number(summary.nan_count || 0) > 0 ? "warning" : "success"],
         ["Статус", formatStatus(summary.technical_status || "ok"), summary.technical_status === "ok" || !summary.technical_status ? "success" : "warning"],
     ];
     const technical = [
@@ -4780,7 +4858,7 @@ async function trainModel() {
                 bootstrap: bootstrapEnabledInput?.checked !== false,
                 // Quick mode (default) caps bootstrap/permutation counts and uses a reduced
                 // GridSearchCV grid (see hyperparameter_search.py) so the run finishes quickly;
-                // "Подробный расчёт" switches to the full ВКР settings from the input fields.
+                // "Подробный расчёт" switches to the full settings from the input fields.
                 n_bootstrap: detailed ? Number(nBootstrapInput?.value || "1000") : 100,
                 permutation_test: permutationEnabledInput?.checked !== false,
                 n_permutations: detailed ? Number(nPermutationsInput?.value || "200") : 50,
@@ -5024,7 +5102,6 @@ async function refreshRuns() {
                         <a class="btn btn-ghost btn-mini" href="/analysis/runs/${encodeURIComponent(run.run_id)}/json">JSON</a>
                         <a class="btn btn-ghost btn-mini" href="/analysis/runs/${encodeURIComponent(run.run_id)}/csv">CSV</a>
                         <a class="btn btn-ghost btn-mini" href="/analysis/runs/${encodeURIComponent(run.run_id)}/xlsx">XLSX</a>
-                        <a class="btn btn-ghost btn-mini" href="/analysis/runs/${encodeURIComponent(run.run_id)}/thesis-tables?format=xlsx">Таблицы ВКР</a>
                         <button type="button" class="btn btn-ghost btn-mini" data-run-export="${escapeHtml(run.run_id)}">ZIP</button>
                         <button type="button" class="btn btn-danger btn-mini" data-delete-run="${escapeHtml(run.run_id)}">Удалить</button>
                     </td>
@@ -5327,6 +5404,8 @@ const PARAMETER_HELP = {
     "n-components": "Сколько скрытых признаков будет использовано моделью. Слишком малое число может упростить модель, слишком большое — привести к переобучению.",
     "model-n-clusters": "Сколько групп алгоритм должен найти в спектрах.",
     "random-state": "Фиксирует случайность, чтобы результат можно было повторить.",
+    "model-name": "Понятное имя, под которым модель будет сохранена после обучения.",
+    "train-dataset-version": "Выберите исходные или предобработанные спектры для обучения.",
     "test-size": "Часть данных, которая не используется при обучении и нужна для проверки качества модели.",
     "model-max-depth": "Ограничивает сложность дерева решений. Без ограничения модель может переобучиться.",
     "model-n-estimators": "Количество деревьев в Random Forest. Больше деревьев обычно повышает устойчивость, но увеличивает время расчёта.",
@@ -5346,6 +5425,15 @@ const PARAMETER_HELP = {
 };
 PARAMETER_HELP["validation-enabled-toggle"] = "Валидация train/test откладывает часть данных для независимой проверки качества модели.";
 PARAMETER_HELP["save-model-after-training"] = "Если включено, обученная модель будет сохранена в списке сохранённых моделей.";
+PARAMETER_HELP["detailed-calculation"] = "Использует больше итераций и полную сетку поиска. Дольше, но подробнее.";
+PARAMETER_HELP["hyperparameter-search"] = "GridSearchCV подбирает гиперпараметры только на train-части.";
+PARAMETER_HELP["refit-on-full-data"] = "После оценки обучает итоговую модель на всех доступных данных.";
+PARAMETER_HELP["kfold-enabled"] = "Дополнительная проверка качества на нескольких разбиениях данных.";
+PARAMETER_HELP["n-splits"] = "Количество фолдов для k-fold проверки.";
+PARAMETER_HELP["bootstrap-enabled"] = "Оценивает доверительные интервалы метрик по повторным выборкам.";
+PARAMETER_HELP["n-bootstrap"] = "Сколько bootstrap-выборок использовать для интервалов.";
+PARAMETER_HELP["permutation-enabled"] = "Проверяет, насколько метрика лучше случайной перестановки целевой переменной.";
+PARAMETER_HELP["n-permutations"] = "Сколько случайных перестановок выполнить для p-value.";
 
 function addHelpTooltip(label, text) {
     if (!label || !text || label.querySelector(".help-tooltip")) return;
