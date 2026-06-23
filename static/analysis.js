@@ -871,9 +871,15 @@ function updateModelAdvancedSettings(modelType) {
     };
     const allowed = new Set(map[modelType] || []);
     document.querySelectorAll("[data-model-param]").forEach((node) => {
-        node.style.display = !simple && allowed.has(node.dataset.modelParam) ? "flex" : "none";
+        const param = node.dataset.modelParam;
+        const showRandomState = param === "random_state";
+        node.style.display = (showRandomState || (!simple && allowed.has(param))) ? "flex" : "none";
     });
-    if (methodParamsFields) methodParamsFields.style.display = simple ? "none" : "";
+    if (methodParamsFields) {
+        const visibleParams = Array.from(methodParamsFields.querySelectorAll("[data-model-param]"))
+            .some((node) => node.style.display !== "none");
+        methodParamsFields.style.display = visibleParams ? "" : "none";
+    }
     // Detailed comparison mode: compare_classification/compare_regression need an honest holdout split and
     // GridSearchCV by default, regardless of leftover validation/hyperparameter-search toggle
     // state left over from a previous (e.g. exploratory PCA) step.
@@ -929,21 +935,17 @@ function autoTuneModelParams() {
         if (nComponentsInput) nComponentsInput.value = String(Math.max(1, Math.min(3, Math.max(1, nClasses - 1), nSamples - 1, nFeatures)));
         if (doValidationInput) doValidationInput.value = "true";
         if (testSizeInput) testSizeInput.value = "0.3";
-        if (randomStateInput) randomStateInput.value = "42";
     } else if (modelType === "pls") {
         if (nComponentsInput) nComponentsInput.value = String(Math.max(1, Math.min(5, nSamples - 1, nFeatures)));
         if (doValidationInput) doValidationInput.value = "true";
         if (testSizeInput) testSizeInput.value = "0.3";
-        if (randomStateInput) randomStateInput.value = "42";
     } else if (["svm", "random_forest", "decision_tree", "svr", "compare_classification", "compare_regression"].includes(modelType)) {
         if (nComponentsInput) nComponentsInput.value = "";
         if (doValidationInput) doValidationInput.value = "true";
         if (testSizeInput) testSizeInput.value = "0.3";
-        if (randomStateInput) randomStateInput.value = "42";
     } else if (["kmeans", "hca", "compare_clustering"].includes(modelType)) {
         if (nComponentsInput) nComponentsInput.value = "";
         if (doValidationInput) doValidationInput.value = "false";
-        if (randomStateInput) randomStateInput.value = "42";
     }
     updateTargetVisibility();
     renderAnalysisWorkflowGuide(importedDatasetSummary);
@@ -1055,6 +1057,10 @@ function clearStructuredBlocks() {
     if (resultExplainer) resultExplainer.textContent = "";
     if (validationSummary) validationSummary.innerHTML = "";
     if (comparisonResult) comparisonResult.innerHTML = "";
+    if (modelMetadataCard) {
+        modelMetadataCard.innerHTML = "";
+        modelMetadataCard.style.display = "none";
+    }
     const summaryCard = document.getElementById("result-summary-card");
     if (summaryCard) summaryCard.innerHTML = "";
     const detailsBlock = document.getElementById("run-details-block");
@@ -1434,6 +1440,7 @@ function renderStructuredResult(payload, mode) {
         lastRenderedRunId = payload.run_id || payload.run?.run_id || null;
         renderValidationBlock(payload.validation, payload);
         renderMetricsTable(payload.metrics ? [{ method: payload.model_type || saved.model_type || "model", status: "success", metrics: payload.metrics }] : []);
+        renderTrainingResultModelMetadata(payload);
         if (payload.task_type === "regression" && Array.isArray(payload.predictions) && payload.predictions.length) {
             appendRegressionPredictionsTable(payload.predictions);
         }
@@ -1457,6 +1464,51 @@ function renderStructuredResult(payload, mode) {
         showResultTab("summary");
         scrollToResults();
     }
+}
+
+function buildTrainingResultModelMetadata(payload = {}) {
+    const saved = payload.saved_model || {};
+    const summary = payload.summary || {};
+    const validation = payload.validation || {};
+    const performance = payload.performance || {};
+    const targetName = payload.target_name || summary.target_name || saved.target_name || saved.target_column;
+    const axis = Array.isArray(saved.spectral_axis) ? saved.spectral_axis : [];
+    const axisRange = axis.length ? [axis[0], axis[axis.length - 1]] : undefined;
+    return {
+        ...saved,
+        ...payload,
+        model_id: saved.model_id || payload.model_id,
+        model_type: saved.model_type || payload.model_type,
+        model_name: saved.model_name || payload.model_name,
+        task_type: payload.task_type || saved.task_type,
+        dataset_name: payload.dataset_name || payload.source_dataset_name || summary.dataset_name || saved.dataset_name || saved.source_dataset_name,
+        dataset_id: payload.dataset_id || summary.dataset_id || saved.dataset_id,
+        dataset_version: payload.dataset_version || saved.dataset_version,
+        target_name: targetName,
+        target_type: payload.target_type || summary.target_type || saved.target_type,
+        classes: payload.classes || payload.metrics?.classes || saved.classes,
+        metrics: payload.metrics || saved.metrics || {},
+        validation,
+        validation_status: validation.status || payload.validation_status || saved.validation_status,
+        performance,
+        best_params: payload.best_params ?? saved.best_params,
+        training_policy: payload.training_policy || saved.training_policy,
+        reproducibility: payload.reproducibility || saved.reproducibility,
+        preprocessing_config: payload.preprocessing_config || summary.preprocessing_config || saved.preprocessing_config || saved.preprocessing,
+        measurement_metadata: payload.measurement_metadata || summary.measurement_metadata || saved.measurement_metadata,
+        sample_metadata_preview: payload.sample_metadata_preview || summary.sample_metadata_preview || saved.sample_metadata_preview,
+        n_samples: payload.n_samples || summary.n_samples || saved.n_samples || saved.sample_count,
+        feature_count: payload.feature_count || summary.n_features || saved.feature_count || saved.expected_feature_count,
+        expected_feature_count: saved.expected_feature_count || payload.feature_count || summary.n_features,
+        axis_range: payload.axis_range || saved.axis_range || axisRange,
+        run_id: payload.run_id || saved.run_id,
+    };
+}
+
+function renderTrainingResultModelMetadata(payload = {}) {
+    const meta = buildTrainingResultModelMetadata(payload);
+    if (!meta.model_id && !meta.model_type && !meta.model_name) return;
+    renderModelMetadataCard(meta);
 }
 
 function buildResultInterpretation(payload = {}) {
@@ -5423,6 +5475,7 @@ const PARAMETER_HELP = {
     "pre-crop-max": "Верхняя граница информативной области спектра.",
     "do-validation": "Валидация train/test откладывает часть данных для проверки качества модели.",
 };
+PARAMETER_HELP["random-state"] = `${PARAMETER_HELP["random-state"]} -1 = случайный seed.`;
 PARAMETER_HELP["validation-enabled-toggle"] = "Валидация train/test откладывает часть данных для независимой проверки качества модели.";
 PARAMETER_HELP["save-model-after-training"] = "Если включено, обученная модель будет сохранена в списке сохранённых моделей.";
 PARAMETER_HELP["detailed-calculation"] = "Использует больше итераций и полную сетку поиска. Дольше, но подробнее.";

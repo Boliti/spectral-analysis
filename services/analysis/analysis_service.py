@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import tracemalloc
+import secrets
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -38,6 +39,21 @@ except ImportError:  # pragma: no cover - optional dependency
 
 def _timestamp_name() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _resolve_random_state(random_state: int) -> Dict[str, Any]:
+    requested = int(random_state)
+    if requested == -1:
+        return {
+            "requested_random_state": requested,
+            "random_state": secrets.randbelow(2**32 - 1),
+            "random_state_mode": "random",
+        }
+    return {
+        "requested_random_state": requested,
+        "random_state": requested,
+        "random_state_mode": "fixed",
+    }
 
 
 class _MemoryProbe:
@@ -165,6 +181,10 @@ class AnalysisService:
         memory_probe = _MemoryProbe()
         total_start = time.perf_counter()
         try:
+            random_state_info = _resolve_random_state(random_state)
+            effective_random_state = int(random_state_info["random_state"])
+            if model_params and int(model_params.get("random_state", effective_random_state)) == -1:
+                model_params = {**model_params, "random_state": effective_random_state}
             _stage("preparing_data")
             x = dataset.x
             y = self._parse_supervised_targets(model_type, raw_targets, dataset.sample_count)
@@ -176,7 +196,7 @@ class AnalysisService:
                 x=x,
                 y=y,
                 n_components=n_components,
-                random_state=random_state,
+                random_state=effective_random_state,
                 provided=model_params,
             )
             validation, eval_model, tuned_params, validation_time_sec = self._run_validation(
@@ -187,7 +207,7 @@ class AnalysisService:
                 model_params=params,
                 do_validation=do_validation,
                 test_size=test_size,
-                random_state=random_state,
+                random_state=effective_random_state,
                 hyperparameter_search=hyperparameter_search,
                 kfold_enabled=kfold_enabled,
                 bootstrap_enabled=bootstrap_enabled,
@@ -297,7 +317,9 @@ class AnalysisService:
                 "validation_config": {
                     "enabled": bool(do_validation),
                     "test_size": float(max(0.1, min(0.5, test_size))),
-                    "random_state": int(random_state),
+                    "random_state": effective_random_state,
+                    "requested_random_state": int(random_state_info["requested_random_state"]),
+                    "random_state_mode": random_state_info["random_state_mode"],
                 },
                 "validation": validation,
                 "metrics": metrics,
@@ -308,9 +330,11 @@ class AnalysisService:
                 "training_policy_note": "metrics.confusion_matrix and metrics.* reflect test_outputs (holdout) when validation.status == 'ok'; full_dataset_outputs/outputs are diagnostic-only.",
                 "hyperparameter_search": hyperparameter_search_report,
                 "reproducibility": {
-                    "random_state": int(random_state),
-                    "user_overridden_random_state": int(random_state) != 42,
-                    "numpy_random_seed": int(random_state),
+                    "random_state": effective_random_state,
+                    "requested_random_state": int(random_state_info["requested_random_state"]),
+                    "random_state_mode": random_state_info["random_state_mode"],
+                    "user_overridden_random_state": int(random_state_info["requested_random_state"]) != 42,
+                    "numpy_random_seed": effective_random_state,
                 },
                 "performance": performance,
             }
